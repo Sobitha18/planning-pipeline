@@ -13,7 +13,7 @@ from pathlib import Path
 from sqlalchemy import func, or_, select
 
 from src.db import get_session
-from src.models import File, FileImport, Repo, Symbol, SymbolEdge
+from src.models import File, FileImport, ProjectRepo, Repo, Symbol, SymbolEdge
 
 
 @dataclass
@@ -57,6 +57,83 @@ def get_repo(repo_id) -> dict | None:
         return None if repo is None else {
             "id": repo.id, "root_path": repo.root_path, "indexed_sha": repo.indexed_sha,
         }
+    finally:
+        session.close()
+
+
+def get_project_repos(project_id: int) -> list[dict]:
+    """Every repo in a project, ordered by id (stable ordering keeps the
+    router's repo names deterministic)."""
+    session = get_session()
+    try:
+        q = (
+            select(Repo)
+            .join(ProjectRepo, ProjectRepo.repo_id == Repo.id)
+            .where(ProjectRepo.project_id == project_id)
+            .order_by(Repo.id)
+        )
+        return [
+            {"id": r.id, "root_path": r.root_path, "status": r.status,
+             "indexed_sha": r.indexed_sha}
+            for r in session.execute(q).scalars()
+        ]
+    finally:
+        session.close()
+
+
+def repo_stats(repo_id) -> dict:
+    """Shape of an indexed repo: file count, files per language, and the
+    top-level directories (with file counts). Index-only — no disk access."""
+    session = get_session()
+    try:
+        rows = session.execute(
+            select(File.path, File.language).where(File.repo_id == repo_id)
+        ).all()
+    finally:
+        session.close()
+    languages: dict[str, int] = {}
+    top_dirs: dict[str, int] = {}
+    for path, language in rows:
+        languages[language] = languages.get(language, 0) + 1
+        head = path.split("/", 1)[0] if "/" in path else "."
+        top_dirs[head] = top_dirs.get(head, 0) + 1
+    return {"file_count": len(rows), "languages": languages, "top_dirs": top_dirs}
+
+
+def exported_symbol_names(repo_id, limit: int = 30) -> list[str]:
+    session = get_session()
+    try:
+        q = (
+            select(Symbol.qualified_name)
+            .join(File, Symbol.file_id == File.id)
+            .where(File.repo_id == repo_id, Symbol.exported.is_(True))
+            .order_by(Symbol.qualified_name)
+            .limit(limit)
+        )
+        return [n for (n,) in session.execute(q).all()]
+    finally:
+        session.close()
+
+
+# Mirrors src/indexer/tables.TABLE_KINDS (not imported: query layer stays
+# free of indexer imports): where a table is defined, changed, or a Prisma model.
+TABLE_KINDS = ("table", "table_change", "model")
+
+
+def find_tables(repo_id, name: str | None = None, *, limit: int = 40) -> list[SymbolHit]:
+    """Table symbols in a repo (definitions first, then migration changes);
+    `name` narrows to a case-insensitive substring of the table name."""
+    session = get_session()
+    try:
+        q = (
+            select(Symbol, File.path)
+            .join(File, Symbol.file_id == File.id)
+            .where(File.repo_id == repo_id, Symbol.kind.in_(TABLE_KINDS))
+        )
+        if name:
+            q = q.where(Symbol.name.ilike(f"%{_escaped(name)}%", escape="\\"))
+        q = q.order_by(Symbol.kind == "table_change", Symbol.name, File.path).limit(limit)
+        return [_symbol_hit(sym, path) for sym, path in session.execute(q).all()]
     finally:
         session.close()
 

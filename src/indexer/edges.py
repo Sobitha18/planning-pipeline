@@ -171,6 +171,9 @@ def build_edges(repo_id: int) -> EdgeStats:
             select(Symbol, File.path)
             .join(File, Symbol.file_id == File.id)
             .where(File.repo_id == repo_id)
+            # table symbols share a span with their ORM class; keeping them
+            # out stops them winning _enclosing() ties. They have no edges.
+            .where(Symbol.kind.notin_(("table", "table_change")))
         ).all()
         symbols_by_file: dict[int, list[_Sym]] = {}
         by_name: dict[str, list[_Sym]] = {}

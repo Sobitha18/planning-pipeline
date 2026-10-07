@@ -12,8 +12,11 @@ SKIP_DIRS = {
     "node_modules", ".next", ".git", "dist", "build", ".turbo", "coverage",
     ".vercel", "out", "__pycache__", ".venv", "venv", "env", ".tox",
     ".mypy_cache", ".ruff_cache", ".pytest_cache", "site-packages",
-    ".eggs", "migrations", ".worktrees",
+    ".eggs", ".worktrees",
 }
+# "migrations" is deliberately NOT skipped: migration files are indexed as
+# table symbols only (see tables.py), which is how the repo router can tell
+# which repo owns a schema.
 
 SKIP_SUFFIXES = (".d.ts", ".min.js")
 

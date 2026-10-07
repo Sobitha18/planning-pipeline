@@ -412,3 +412,77 @@ class IdempotencyKey(Base):
     created_at: Mapped[dt.datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, default=lambda: dt.datetime.now(dt.timezone.utc)
     )
+
+
+# --- Multi-repo: projects + repo router -------------------------------------
+# A project is a named set of already-registered repos. The repo router
+# (src/repo_router.py) picks which of a project's repos a request touches.
+
+
+class Project(Base):
+    __tablename__ = "projects"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False,
+        default=lambda: dt.datetime.now(dt.timezone.utc),
+    )
+
+    repos: Mapped[list["ProjectRepo"]] = relationship(cascade="all, delete-orphan")
+
+
+class ProjectRepo(Base):
+    __tablename__ = "project_repos"
+
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True
+    )
+    repo_id: Mapped[int] = mapped_column(
+        ForeignKey("repos.id", ondelete="CASCADE"), primary_key=True
+    )
+
+
+class RepoEvidence(BaseModel):
+    path: str = Field(description="Indexed file path inside the repo that supports the choice")
+    note: str = Field(description="What in that file connects it to the request")
+
+
+class AgentEvidence(BaseModel):
+    """What the router agent writes: it cites a file by the number a tool
+    result showed for it, never by typing a path. The code resolves the number
+    to the real path (src/repo_router.EvidenceRegistry)."""
+
+    file: str = Field(description="File number exactly as shown in tool results, e.g. F12")
+    note: str = Field(description="What in that file connects it to the request")
+
+
+class AgentRepo(BaseModel):
+    repo: str = Field(description="Repo name exactly as list_repos returned it")
+    role: Literal["primary", "impacted"]
+    reason: str
+    evidence: list[AgentEvidence] = Field(min_length=1)
+
+
+class AgentAnswer(BaseModel):
+    """The router agent's final answer. `repos` omits every repo that is
+    neither primary nor impacted."""
+
+    repos: list[AgentRepo]
+
+
+class SelectedRepo(BaseModel):
+    repo: str
+    role: Literal["primary", "impacted"]
+    reason: str
+    evidence: list[RepoEvidence] = Field(min_length=1)
+
+
+class ResolvedRepo(SelectedRepo):
+    repo_id: int
+
+
+class RepoSelection(BaseModel):
+    project_id: int
+    repos: list[ResolvedRepo]
+    stats: dict = Field(default_factory=dict)

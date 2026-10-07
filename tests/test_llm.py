@@ -322,3 +322,79 @@ def test_api_key_comes_from_llm_api_key_not_anthropic_api_key(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "from-anthropic-api-key")
     assert LLMGateway().client.api_key == "from-llm-api-key"
     assert LLMGateway(api_key="explicit").client.api_key == "explicit"
+
+
+# --- run_tool_loop ---------------------------------------------------------
+
+
+class FakeToolUse:
+    type = "tool_use"
+
+    def __init__(self, id, name, input):
+        self.id, self.name, self.input = id, name, input
+
+
+class FakeToolMessage:
+    def __init__(self, blocks, input_tokens=10, output_tokens=5):
+        self.content = blocks
+        self.usage = FakeUsage(input_tokens, output_tokens)
+
+
+TOOLS = [{"name": "echo", "description": "d", "input_schema": {"type": "object", "properties": {}}}]
+
+
+def test_tool_loop_runs_tools_then_returns_final_text(gateway, monkeypatch):
+    fake = install_fake(monkeypatch, gateway, [
+        FakeToolMessage([FakeBlock("looking"), FakeToolUse("t1", "echo", {"x": 1})]),
+        FakeMessage("done"),
+    ])
+    seen = []
+    result = gateway.run_tool_loop(
+        tier="cheap", system="sys", user="usr", tools=TOOLS,
+        handler=lambda name, args: seen.append((name, args)) or "echoed",
+    )
+    assert result.text == "done" and result.turns == 2 and not result.exhausted
+    assert seen == [("echo", {"x": 1})]
+    # the 2nd request carries the assistant's tool_use and our tool_result
+    second = fake.calls[1]["messages"]
+    assert second[1]["content"][1] == {"type": "tool_use", "id": "t1", "name": "echo", "input": {"x": 1}}
+    assert second[2]["content"][0]["tool_use_id"] == "t1"
+    assert second[2]["content"][0]["content"] == "echoed"
+    assert second[2]["content"][0]["is_error"] is False
+
+
+def test_tool_loop_handler_error_goes_back_to_the_model(gateway, monkeypatch):
+    fake = install_fake(monkeypatch, gateway, [
+        FakeToolMessage([FakeToolUse("t1", "echo", {})]),
+        FakeMessage("recovered"),
+    ])
+
+    def boom(name, args):
+        raise ValueError("bad arg")
+
+    result = gateway.run_tool_loop(tier="cheap", system="s", user="u", tools=TOOLS, handler=boom)
+    assert result.text == "recovered"
+    block = fake.calls[1]["messages"][2]["content"][0]
+    assert block["is_error"] is True and "bad arg" in block["content"]
+    assert result.tool_calls[0]["error"] == "bad arg"
+
+
+def test_tool_loop_max_turns_forces_an_answer_with_tools_off(gateway, monkeypatch):
+    fake = install_fake(monkeypatch, gateway, [
+        FakeToolMessage([FakeToolUse("t1", "echo", {})]),
+        FakeToolMessage([FakeToolUse("t2", "echo", {})]),   # would be a 3rd tool call...
+        FakeMessage("forced answer"),                         # ...but tools are off now
+    ])
+    result = gateway.run_tool_loop(
+        tier="cheap", system="s", user="u", tools=TOOLS, handler=lambda n, a: "ok", max_turns=2)
+    assert result.text == "forced answer" and result.exhausted is True
+    assert "tool_choice" not in fake.calls[0] and "tool_choice" not in fake.calls[1]
+    assert fake.calls[2]["tool_choice"] == {"type": "none"}
+    assert "Tool budget exhausted" in fake.calls[2]["messages"][-1]["content"]
+
+
+def test_tool_loop_respects_token_budget(gateway, monkeypatch):
+    install_fake(monkeypatch, gateway, [FakeMessage("never reached")])
+    with pytest.raises(BudgetExceeded):
+        gateway.run_tool_loop(tier="cheap", system="s", user="u", tools=TOOLS,
+                              handler=lambda n, a: "", budget=TokenBudget(max_tokens=1))

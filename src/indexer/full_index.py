@@ -25,6 +25,7 @@ _LANG_BY_EXT = {
     ".py": "python",
     ".ts": "typescript", ".tsx": "typescript", ".js": "typescript",
     ".jsx": "typescript", ".mjs": "typescript", ".cjs": "typescript",
+    ".prisma": "prisma", ".sql": "sql",
 }
 
 BATCH_SIZE = 200

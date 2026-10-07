@@ -66,7 +66,7 @@ _LANGUAGES: dict[str, _Lang] = {
     ".mjs": _TSX, ".cjs": _TSX,
 }
 
-SUPPORTED_EXTENSIONS = frozenset(_LANGUAGES) | {".prisma"}
+SUPPORTED_EXTENSIONS = frozenset(_LANGUAGES) | {".prisma", ".sql"}
 
 # node types that open a new naming scope, per family
 _PY_SCOPES = {"class_definition", "function_definition"}
@@ -243,12 +243,22 @@ def extract(file_path: str, content: str | bytes,
     if ext == ".prisma":
         from src.indexer.prisma import parse_prisma  # local: avoid import cycle
         return parse_prisma(file_path, content, repo_root)
+    if ext == ".sql":
+        from src.indexer.tables import sql_file_symbols
+        return sql_file_symbols(file_path, content, repo_root)
 
     lang = _LANGUAGES.get(ext)
     if lang is None:
         return []
 
     source = content.encode() if isinstance(content, str) else content
+
+    from src.indexer.tables import is_migration_path, migration_call_symbols
+    if is_migration_path(file_path):
+        # A migration's value is which tables it creates/changes, not its
+        # upgrade()/downgrade() functions — index only the table symbols.
+        return migration_call_symbols(
+            source.decode(errors="replace"), _module_path(file_path, repo_root), lang.name)
     tree = lang.parser.parse(source)
     module = _module_path(file_path, repo_root)
     is_py = lang.name == "python"
@@ -308,4 +318,9 @@ def extract(file_path: str, content: str | bytes,
             signature=_signature(sig_node, span, source),
             docstring=doc, exported=exported, language=lang.name,
         ))
+
+    from src.indexer.tables import orm_table_symbols
+    symbols.extend(orm_table_symbols(
+        [s for s in symbols if s.kind == "class"],
+        source.decode(errors="replace"), module, lang.name))
     return symbols

@@ -5,8 +5,9 @@ enforcement with a bounded repair-retry loop, transport retry (delegated to
 the anthropic SDK's own backoff), per-call logging to `llm_calls`, and an
 optional per-run token budget.
 
-Out of scope (see task-prompts/04-llm-gateway.md): streaming, tool-use/MCP
-passthrough, caching, multi-provider abstraction, async client.
+Out of scope (see task-prompts/04-llm-gateway.md): streaming, MCP
+passthrough, caching, multi-provider abstraction, async client. Tool use is
+supported only through `run_tool_loop` (added for the multi-repo router).
 """
 
 from __future__ import annotations
@@ -15,7 +16,8 @@ import datetime as dt
 import json
 import sys
 import time
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import anthropic
@@ -121,6 +123,21 @@ def _log_call(
             session.close()
     except Exception as exc:  # DB unavailable, schema missing, etc.
         print(f"[llm] failed to log call: {exc}", file=sys.stderr)
+
+
+@dataclass
+class ToolLoopResult:
+    text: str                      # the model's final plain-text answer
+    turns: int                     # model calls made
+    tool_calls: list[dict] = field(default_factory=list)   # [{name, input, error}]
+    exhausted: bool = False        # True if max_turns forced the final answer
+
+
+def _block_to_param(block) -> dict:
+    """Response content block -> the dict shape messages.create accepts back."""
+    if block.type == "tool_use":
+        return {"type": "tool_use", "id": block.id, "name": block.name, "input": block.input}
+    return {"type": "text", "text": getattr(block, "text", "")}
 
 
 class LLMGateway:
@@ -281,3 +298,97 @@ class LLMGateway:
             error=None, run_id=run_id,
         )
         return text
+
+    def run_tool_loop(
+        self,
+        *,
+        tier: str,
+        system: str,
+        user: str,
+        tools: list[dict],
+        handler: Callable[[str, dict], str],
+        max_turns: int = 12,
+        max_tokens: int = 2048,
+        purpose: str = "unspecified",
+        run_id: int | None = None,
+        budget: TokenBudget | None = None,
+    ) -> ToolLoopResult:
+        """Let the model call `tools` until it answers in plain text.
+
+        `handler(name, input) -> str` runs one tool; an exception from it is
+        returned to the model as an error result instead of aborting the loop
+        (a bad argument is something the model can correct). After `max_turns`
+        model calls the tools are switched off (tool_choice none) and the
+        model must answer with what it has.
+        """
+        model = self._model_for(tier)
+        messages: list[dict] = [{"role": "user", "content": user}]
+        calls: list[dict] = []
+        turns = 0
+        exhausted = False
+
+        while True:
+            force_answer = turns >= max_turns
+            if force_answer:
+                exhausted = True
+                messages.append({
+                    "role": "user",
+                    "content": "Tool budget exhausted. Give your final answer now, "
+                               "using only what you have already found.",
+                })
+            kwargs = {"tool_choice": {"type": "none"}} if force_answer else {}
+
+            estimate = _estimate_tokens(system + json.dumps(messages, default=str), max_tokens)
+            if budget is not None:
+                budget.check(estimate)
+
+            start = time.monotonic()
+            try:
+                response = self.client.messages.create(
+                    model=model,
+                    max_tokens=max_tokens,
+                    system=system,
+                    tools=tools,
+                    thinking={"type": "disabled"},
+                    messages=messages,
+                    **kwargs,
+                )
+            except Exception as exc:
+                _log_call(
+                    tier=tier, model=model, purpose=purpose, input_tokens=None,
+                    output_tokens=None,
+                    duration_ms=int((time.monotonic() - start) * 1000),
+                    ok=False, error=str(exc), run_id=run_id,
+                )
+                raise
+            turns += 1
+            in_tok = response.usage.input_tokens
+            out_tok = response.usage.output_tokens
+            if budget is not None:
+                budget.add(in_tok + out_tok)
+            _log_call(
+                tier=tier, model=model, purpose=purpose, input_tokens=in_tok,
+                output_tokens=out_tok,
+                duration_ms=int((time.monotonic() - start) * 1000),
+                ok=True, error=None, run_id=run_id,
+            )
+
+            tool_uses = [b for b in response.content if b.type == "tool_use"]
+            if not tool_uses or force_answer:
+                text = "".join(b.text for b in response.content if b.type == "text")
+                return ToolLoopResult(text=text, turns=turns, tool_calls=calls, exhausted=exhausted)
+
+            messages.append({"role": "assistant", "content": [_block_to_param(b) for b in response.content]})
+            results = []
+            for block in tool_uses:
+                try:
+                    out, is_error = handler(block.name, block.input), False
+                    calls.append({"name": block.name, "input": block.input, "error": None})
+                except Exception as exc:  # noqa: BLE001 - surfaced to the model
+                    out, is_error = f"error: {exc}", True
+                    calls.append({"name": block.name, "input": block.input, "error": str(exc)})
+                results.append({
+                    "type": "tool_result", "tool_use_id": block.id,
+                    "content": out, "is_error": is_error,
+                })
+            messages.append({"role": "user", "content": results})
