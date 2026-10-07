@@ -1,0 +1,346 @@
+{
+  "context_pack": {
+    "files": [
+      {
+        "content": "retained as seed (rerank said irrelevant: Root endpoint unrelated to sync failures or clinical ops visibility)",
+        "label": "peripheral",
+        "path": "app/main.py",
+        "reason": "retained as seed (rerank said irrelevant: Root endpoint unrelated to sync failures or clinical ops visibility)",
+        "tier": 3
+      },
+      {
+        "content": "- class ClinicalSynthesisAgent: \u2014 Generates three synthesis fields for a guideline using document chunks as context.\n- def __init__(self):\n- def generate(\n        self,\n        guideline: dict,\n        all_chunks: List[dict],\n    ) -> Tuple[str, str, str]: \u2014 Returns (concept_description, lyric_clinical_input, industry_market_guidance).\n- def _get_linked_chunks(self, linked_ids: set, all_chunks: List[dict]) -> List[dict]:\n- def _rank_scientific_chunks(\n        self,\n        guideline: dict,\n        linked_ids: set,\n        all_chunks: List[dict],\n        section_map: Dict[str, str],\n    ) -> Tuple[List[dict], List[int]]: \u2014 Ranks non-linked chunks by code + keyword overlap with the guideline.\n- def _generate_market_guidance(\n        self,\n        guideline: dict,\n        linked_ids: set,\n        all_chunks: List[dict],\n        codes_summary: str,\n        section_map: Dict[str, str],\n    ) -> str: \u2014 Selects evidence from sections classified as 'evidence' in this document.\n- def _classify_all_sections(self, all_chunks: List[dict]) -> Dict[str, str]: \u2014 Reads all unique section names from the document and classifies each.\n- def _classify_section(self, name: str) -> str:\n        # Match on whole words so short signals (\"code\", \"data\", \"basis\")\n        # don't fire on substrings (\"Encoded\", \"Metadata\", \"basis\" in \"basishead\").:\n- def _score_evidence_chunks(\n        self,\n        guideline: dict,\n        linked_ids: set,\n        all_chunks: List[dict],\n        allowed_sections: set,\n    ) -> List[dict]: \u2014 Returns top MAX_EVIDENCE_CHUNKS from allowed_sections ranked by\n- def _expand_concept_description(self, prompt_vars: dict) -> str:\n- def _expand_lyric_clinical_input(self, prompt_vars: dict) -> str:\n- def generate_claim_scenario(self, guideline: dict, example_rows: Optional[list] = None) -> str: \u2014 LLM generates a 2-sentence claim scenario directly from the guideline.",
+        "label": "relevant",
+        "path": "extraction/agents/clinical_synthesis_agent.py",
+        "reason": "Generates synthesis fields in client documentation pipeline; failures here affect clinical ops visibility",
+        "tier": 2
+      },
+      {
+        "content": "#!/usr/bin/env python3\n\"\"\"Run workers. Use DOCUMENT_PROCESSING_SUBSCRIPTION, SCRAPING_SUBSCRIPTION and related env (see .env.example).\"\"\"\n\nimport asyncio\nimport sys\nimport threading\nfrom dotenv import load_dotenv\n\nfrom shared.logging import get_logger\n\nlogger = get_logger(__name__)\n\n# _ENV_PATH = Path(__file__).resolve().parent.parent / \".env\"\n# load_dotenv(_ENV_PATH, override=False)\n\nload_dotenv(\"../.env\")\n\ndef run_document_processing_worker() -> None:\n    from workers.document_processing_worker.doc_processing_worker import DocumentProcessingWorker\n    worker = DocumentProcessingWorker()\n    try:\n        worker.start()\n    except KeyboardInterrupt:\n        logger.info(\"Document processing worker received shutdown signal\")\n    finally:\n        asyncio.run(worker.shutdown())\n\n\n\ndef run_scraping_worker() -> None:\n    from workers.scraping_worker.scraping_worker import ScrapingWorker\n    worker = ScrapingWorker()\n    try:\n        worker.start()\n    except KeyboardInterrupt:\n        logger.info(\"Scraping worker received shutdown signal\")\n    finally:\n        asyncio.run(worker.shutdown())\n\ndef run_client_documentation_worker() -> None:\n    from workers.client_documentation_worker.client_documentation_worker import ClientDocumentationWorker\n    worker = ClientDocumentationWorker()\n    try:\n        worker.start()\n    except KeyboardInterrupt:\n        logger.info(\"Client documentation worker received shutdown signal\")\n    finally:\n        asyncio.run(worker.shutdown())\n\ndef main() -> None:\n    import argparse\n\n    parser = argparse.ArgumentParser(description=\"Clinical Ops Worker Manager\")\n    parser.add_argument(\n        \"--worker\",\n        choices=[\"document-processing\", \"scraping\", \"client-documentation\", \"all\"],\n        default=\"all\",\n        help=\"Which worker to run\",\n    )\n    args = parser.parse_args()\n\n    if args.worker == \"all\":\n        # Run both workers concurrently using threads\n        logger.info(\"Starting all workers...\")\n        doc_thread = threading.Thread(\n            target=run_document_processing_worker,\n            name=\"DocumentProcessingWorker\",\n            daemon=False\n        )\n        scraping_thread = threading.Thread(\n            target=run_scraping_worker,\n            name=\"ScrapingWorker\",\n            daemon=False\n        )\n        client_documentation_thread = threading.Thread(\n            target=run_client_documentation_worker,\n            name=\"ClientDocumentationWorker\",\n            daemon=False\n        )\n\n        print(\"Running document-processing worker\")\n        doc_thread.start()\n        print(\"Starting scraping worker\")\n        scraping_thread.start()\n        print(\"Starting client-documentation worker\")\n        client_documentation_thread.start()\n\n        # Wait for both threads to complete\n        try:\n            doc_thread.join()\n            scraping_thread.join()\n            client_documentation_thread.join()\n        except KeyboardInterrupt:\n            logger.info(\"Received shutdown signal, workers will terminate gracefully\")\n            doc_thread.join()\n            scraping_thread.join()\n            client_documentation_thread.join()\n    elif args.worker == \"document-processing\":\n        print(\"Running document-processing worker\")\n        run_document_processing_worker()\n    elif args.worker == \"scraping\":\n        print(\"Starting scraping worker\")\n        run_scraping_worker()\n    elif args.worker == \"client-documentation\":\n        print(\"Starting client-documentation worker\")\n        run_client_documentation_worker()\n    else:\n        logger.error(\"Unknown worker type: %s\", args.worker)\n        sys.exit(1)\n\n\nif __name__ == \"__main__\":\n    main()\n",
+        "label": "critical",
+        "path": "workers/run_workers.py",
+        "reason": "Manages all worker processes; sync failures likely originate or need logging/monitoring here",
+        "tier": 1
+      },
+      {
+        "content": "- class ProcedureCodeExtractionAgent(BaseAgent): \u2014 Agent for extracting and validating procedure codes (CPT, HCPCS).\n- def __init__(self):\n- def _load_unlisted_codes(self) -> None: \u2014 Load unlisted codes from JSON for each code type. Uses empty sets if file not found.\n- def _call_llm(self, prompt, system_prompt, response_format=None) -> Dict[str, Any]:\n- def _get_prompt(self, prompt_key, context, reference_text=None, master_list=None):\n- def _get_procedure_descriptions(self, schema_1: Any) -> Dict[str, str]: \u2014 Extract descriptions from initial extraction per code type for vector search.\n- def _fetch_from_vector_db(self, code_descriptions: Dict[str, str]) -> Dict[str, List[Dict[str, Any]]]: \u2014 Fetch similar procedure codes from vector DBs per code type (search_similar, top_k=30).\n- def _create_master_list(\n        self,\n        fetched_codes: Dict[str, List[Dict[str, Any]]],\n        cpt_master_list: Optional[str] = None,\n        hcpcs_master_list: Optional[str] = None,\n    ) -> str: \u2014 Create combined master list from fetched codes: 'CPT: ...; HCPCS: ...'.\n- def _get_code_grouping(\n        self,\n        code_value: str,\n        code_type: str,\n        existing_grouping: Optional[str],\n    ) -> str: \u2014 EXCLUDED if unlisted; DENY if subject or absent; else SUPPORT.\n- def _verify_procedure_codes(\n        self,\n        llm_extracted: Dict[str, List[Dict[str, Any]]],\n        available_codes: Dict[str, List[Dict[str, Any]]],\n    ) -> Dict[str, List[Dict[str, Any]]]: \u2014 Verify codes exist in available_codes (fetched) and set grouping via _get_code_grouping.\n- def _create_required_codes_master_list(\n        self,\n        code_type: str,\n        individual_codes: List[str],\n        code_ranges: List[tuple],\n    ) -> str: \u2014 Create master list string from required codes (matches legacy format).\n- def _fetch_codes_in_ranges(\n        self, code_type: str, code_ranges: List[tuple[str, str]]\n    ) -> List[Dict[str, Any]]: \u2014 Fetch all procedure codes from DB that fall within the given ranges. Uses simple alphanumeric comparison.",
+        "label": "relevant",
+        "path": "extraction/agents/code_extractor/procedure_code_extraction_agent.py",
+        "reason": "Extracts procedure codes with validation; failures impact clinical data accuracy and ops visibility",
+        "tier": 2
+      },
+      {
+        "content": "- def _meta(sender: str, priority: str = \"normal\") -> Dict[str, Any]:\n- def doc_processing(\n    correlation_id: str,\n    job_id: str,\n    revision_id: str,\n    file_paths: list,\n    is_new: bool,\n    document_type: DocumentType,\n    document_name: str,\n    source_name: str,\n    old_rev_id: str,\n    old_rev_file_name: str,\n    old_rev_file_path: str = None,\n    effective_date: str = \"\",\n    end_date: str = \"\",\n    reference_documents: list = None,\n) -> Dict[str, Any]:\n- def extract_guidelines(\n    correlation_id: str,\n    job_id: str,\n    revision_id: str,\n    raw_text: str,\n) -> Dict[str, Any]:\n- def client_documentation(\n    correlation_id: str,\n    revision_id: str,\n    job_id: str | None = None,\n    guideline_id: str | None = None,\n) -> Dict[str, Any]:\n- def scraping(\n    correlation_id: str,\n    job_id: str,\n    source_id: str,\n    connection: Dict[str, Any],\n    source_name: str,\n) -> Dict[str, Any]:",
+        "label": "relevant",
+        "path": "app/utils/pubsub_messages.py",
+        "reason": "Constructs messages for workers; sync failure tracking needs visibility into message payloads",
+        "tier": 2
+      },
+      {
+        "content": "\"\"\"\nClientDocPipeline \u2014 orchestrates clinical synthesis + adjudication for a revision.\n\nEnd-to-end pipeline owned here:\n    1. Fetch ACCEPTED policy guidelines from the latest COMPLETED workflow run on the END\n       node for the revision (`_fetch_revision_data`).\n    2. Load the chunk JSON for that revision from GCS (`_load_chunks`).\n    3. Run `ClientDocPipeline.run` (synthesis + adjudication) over the guidelines.\n    4. Return a typed `ClientDocumentationCompletionPayload` for the worker to send as a callback.\n\nMirrors the layering used by `DocumentProcessor.run_complete_workflow` \u2014\nthe pipeline is responsible for the actual work and a typed completion payload;\nthe worker (`workers/client_documentation_worker/client_documentation_worker.py`)\nonly validates the message and ships the callback.\n\"\"\"\n\nfrom __future__ import annotations\n\nimport json\nimport os\nimport time\nfrom dataclasses import dataclass, field\nfrom enum import Enum\nfrom typing import Any, Callable, Dict, List, Optional\n\nimport psycopg2\nfrom psycopg2.extras import RealDictCursor\n\nfrom domain.client_documentation.client_doc.claim_inference import infer_claim_types\nfrom domain.client_documentation.client_doc.config import get_builder\nfrom domain.client_documentation.superbill.adjudication_runner import (\n    run_adjudication,\n    select_example_rows,\n)\nfrom domain.entities.client_documentation import (\n    ClientDocumentationCompletionPayload,\n    ClientDocumentationPayload,\n)\nfrom extraction.agents.clinical_synthesis_agent import ClinicalSynthesisAgent\nfrom tools.file_io import FileIO\n\n\nclass RevisionFetchStatus(str, Enum):\n    OK = \"ok\"\n    REVISION_NOT_COMPLETED = \"revision_not_completed\"\n    NO_POLICIES = \"no_policies\"\n\n\n@dataclass\nclass RevisionFetchResult:\n    status: RevisionFetchStatus\n    guidelines: List[Dict[str, Any]] = field(default_factory=list)\n    source_id: Optional[str] = None\n    file_name: Optional[str] = None\n\n\n_REVISION_QUERY = \"\"\"\nWITH completed_end_workflow_run AS (\n    SELECT wr.id AS workflow_run_id\n    FROM \"WorkflowRun\" wr\n    INNER JOIN \"WorkflowNode\" wn\n        ON wn.id = wr.\"workflowNodeId\"\n    WHERE wr.\"documentRevisionId\" = %s\n      AND 'END' = ANY(wn.next)\n      AND wr.\"jobStatus\" = 'COMPLETED'\n    ORDER BY wr.\"createdAt\" DESC\n    LIMIT 1\n),\nrevision_meta AS (\n    SELECT\n        dr.id,\n        dr.filename,\n        d.name AS document_name,\n        sjq.\"sourceId\" AS source_id\n    FROM \"DocumentRevision\" dr\n    JOIN \"Document\" d\n        ON d.id = dr.\"documentId\"\n    LEFT JOIN \"SourceJobQueue\" sjq\n        ON sjq.id = dr.\"sourceJobId\"\n    WHERE dr.id = %s\n),\naccepted_policy_versions AS (\n    SELECT DISTINCT ON (dgv.\"documentGuidelineId\")\n        dgv.\"documentGuidelineId\",\n        dgv.content\n    FROM \"DocumentGuidelineVersion\" dgv\n    INNER JOIN completed_end_workflow_run cewr\n        ON cewr.workflow_run_id = dgv.\"workflowRunId\"\n    WHERE dgv.state = 'ACCEPTED'\n      AND dgv.category = 'policy'\n    ORDER BY dgv.\"documentGuidelineId\", dgv.\"createdAt\" DESC\n)\nSELECT\n    (SELECT workflow_run_id FROM completed_end_workflow_run) AS workflow_run_id,\n    rm.source_id,\n    rm.filename AS file_name,\n    (\n        SELECT json_agg(\n            json_build_object(\n                'guidelineId',    dg.id,\n                'name',           COALESCE(dr.\"documentName\", d.name),\n                'content',        apv.content,\n                'guidelineName',  dg.\"guidelineName\",\n                'documentNumber', d.\"documentNumber\",\n                'sourceName',     src.\"sourceName\",\n                'category',       d.category\n            )\n            ORDER BY dg.\"startPageNumber\", dg.\"endPageNumber\"\n        )\n        FROM accepted_policy_versions apv\n        JOIN \"DocumentGuideline\" dg\n            ON dg.id = apv.\"documentGuidelineId\"\n        JOIN \"DocumentRevision\" dr\n            ON dr.id = dg.\"documentRevisionId\"\n        JOIN \"Document\" d\n            ON d.id = dr.\"documentId\"\n        LEFT JOIN \"SourceJobQueue\" sjq\n            ON sjq.id = dr.\"sourceJobId\"\n        LEFT JOIN \"Source\" src\n            ON src.id = sjq.\"sourceId\"\n        WHERE dr.id = %s\n          AND (%s::text IS NULL OR dg.id = %s)\n    ) AS result\nFROM revision_meta rm\n\"\"\"\n\n\nclass ClientDocPipeline:\n    \"\"\"Main workflow orchestrator for client-documentation generation.\n\n    Use `run_complete_workflow(payload)` for end-to-end execution against a revision id\n    (DB fetch + GCS chunk load + synthesis + adjudication). The lower-level `process`\n    and `run` methods are kept identical to the previous implementation so existing\n    callers (local test scripts, ad-hoc batch runs) keep working.\n    \"\"\"\n\n    def __init__(self) -> None:\n        self._agent = ClinicalSynthesisAgent()\n        self._file_io: Optional[FileIO] = None\n        self._database_url: Optional[str] = None\n        self._logger = self._get_logger()\n\n    def _get_logger(self):\n        try:\n            from shared.logging import get_logger\n            return get_logger(__name__)\n        except ImportError:\n            import logging\n            return logging.getLogger(__name__)\n\n    @property\n    def file_io(self) -> FileIO:\n        if self._file_io is None:\n            self._file_io = FileIO()\n        return self._file_io\n\n    @property\n    def database_url(self) -> str:\n        if self._database_url is None:\n            url = os.getenv(\"DATABASE_URL\")\n            if not url:\n                raise ValueError(\"DATABASE_URL environment variable is not set\")\n            self._database_url = url\n        return self._database_url\n\n    def run_complete_workflow(\n        self, payload: ClientDocumentationPayload\n    ) -> ClientDocumentationCompletionPayload:\n        \"\"\"End-to-end pipeline for a single DocumentRevision.\n\n        Returns a `ClientDocumentationCompletionPayload` describing the outcome \u2014 never raises.\n        Terminal errors (revision not completed, no policies, unexpected exception) are\n        surfaced via `status=\"failed\"` + `error_code` + `error_message`.\n        \"\"\"\n        revision_id = payload.revision_id\n        guideline_id = payload.guideline_id\n        job_id = payload.job_id\n        try:\n            fetch = self._fetch_revision_data(revision_id, guideline_id)\n\n            if fetch.status is RevisionFetchStatus.REVISION_NOT_COMPLETED:\n                msg = f\"DocumentRevision = '{revision_id}' is not yet marked as COMPLETED\"\n                self._logger.warning(msg)\n                return ClientDocumentationCompletionPayload(\n                    revision_id=revision_id,\n                    job_id=job_id,\n                    status=\"failed\",\n                    error_code=\"REVISION_NOT_COMPLETED\",\n                    error_message=msg,\n                )\n\n            if fetch.status is RevisionFetchStatus.NO_POLICIES:\n                msg = f\"no policies found for the {revision_id}\"\n                self._logger.warning(msg)\n                return ClientDocumentationCompletionPayload(\n                    revision_id=revision_id,\n                    job_id=job_id,\n                    status=\"failed\",\n                    source_id=fetch.source_id,\n                    file_name=fetch.file_name,\n                    error_code=\"NO_POLICIES_FOUND\",\n                    error_message=msg,\n                )\n\n            self._logger.info(\n                \"Fetched %d guidelines from DB for revision_id=%s guideline_id=%s job_id=%s\",\n                len(fetch.guidelines),\n                revision_id,\n                guideline_id,\n                job_id,\n            )\n\n            chunks = self._load_chunks(fetch.source_id, revision_id, fetch.file_name)\n\n            results, _elapsed = self.run(fetch.guidelines, chunks)\n\n            return ClientDocumentationCompletionPayload(\n                revision_id=revision_id,\n                job_id=job_id,\n                status=\"completed\",\n                results=results,\n                guideline_count=len(results),\n                source_id=fetch.source_id,\n                file_name=fetch.file_name,\n            )\n        except Exception as exc:\n            self._logger.error(\n                \"Client documentation processing failed for revision_id=%s job_id=%s: %s\",\n                revision_id,\n                job_id,\n                exc,\n                exc_info=True,\n            )\n            return ClientDocumentationCompletionPayload(\n                revision_id=revision_id,\n                job_id=job_id,\n                status=\"failed\",\n                error_message=str(exc),\n            )\n\n    def process(self, guideline: dict, chunks: list) -> tuple[dict, str, str, str, dict, float]:\n        \"\"\"\n        Process a single guideline through synthesis + adjudication.\n\n        Returns:\n            (result_dict, concept_description, lyric_clinical_input,\n             industry_market_guidance, adjudication, elapsed_seconds)\n        \"\"\"\n        t0 = time.time()\n        concept_description, lyric_clinical_input, industry_market_guidance = self._agent.generate(\n            guideline=guideline, all_chunks=chunks\n        )\n        elapsed = time.time() - t0\n\n        # Build the example first: the scenario is written against the codes the\n        # table ends up showing, so the prose and the table can't disagree.\n        adjudication   = run_adjudication(guideline)\n        # Show both sides of the edit \u2014 denials alongside passing claims \u2014 not just denials.\n        claim_example  = self._agent.filter_claim_example(\n            select_example_rows(adjudication), guideline\n        )\n        claim_scenario = self._agent.generate_claim_scenario(guideline, claim_example)\n\n        gv = guideline.get(\"guideline_value\", \"\")\n        concept_label = (gv.split(\".\")[0] + \".\").strip() if \".\" in gv else gv[:200].strip()\n        builder = get_builder(guideline.get(\"category\"))\n\n        result = {\n            \"guideline_id\": guideline.get(\"guideline_id\", \"\"),\n            \"client_documentation\": builder.build_client_documentation(\n                guideline, concept_label, concept_description,\n                lyric_clinical_input, claim_example, claim_scenario,\n                industry_market_guidance,\n            ),\n        }\n\n        return result, concept_description, lyric_clinical_input, industry_market_guidance, claim_example, elapsed\n\n    def run(\n        self,\n        guidelines: list,\n        chunks: list,\n        on_guideline_done: Callable | None = None,\n    ) -> tuple[list, float]:\n        \"\"\"\n        Process all guidelines and return (results, total_elapsed_seconds).\n\n        on_guideline_done(i, total, guideline, concept_desc, lyric_input, market_guidance, claim_example, elapsed)\n        \"\"\"\n        results     = []\n        total_start = time.time()\n\n        for i, guideline in enumerate(guidelines, 1):\n            result, concept_desc, lyric_input, market_guidance, claim_example, elapsed = self.process(\n                guideline, chunks\n            )\n            results.append(result)\n            if on_guideline_done:\n                on_guideline_done(i, len(guidelines), guideline, concept_desc, lyric_input, market_guidance, claim_example, elapsed)\n\n        return results, time.time() - total_start\n\n    def _fetch_revision_data(\n        self, revision_id: str, guideline_id: Optional[str] = None\n    ) -> RevisionFetchResult:\n        with psycopg2.connect(self.database_url, cursor_factory=RealDictCursor) as conn:\n            with conn.cursor() as cur:\n                cur.execute(\n                    _REVISION_QUERY,\n                    (revision_id, revision_id, revision_id, guideline_id, guideline_id),\n                )\n                row = cur.fetchone()\n\n        if not row or not row.get(\"workflow_run_id\"):\n            return RevisionFetchResult(status=RevisionFetchStatus.REVISION_NOT_COMPLETED)\n\n        raw_rows = row.get(\"result\")\n        if not raw_rows:\n            return RevisionFetchResult(\n                status=RevisionFetchStatus.NO_POLICIES,\n                source_id=row.get(\"source_id\"),\n                file_name=row.get(\"file_name\"),\n            )\n\n        return RevisionFetchResult(\n            status=RevisionFetchStatus.OK,\n            guidelines=self._parse_guidelines(raw_rows),\n            source_id=row.get(\"source_id\"),\n            file_name=row.get(\"file_name\"),\n        )\n\n    def _parse_guidelines(self, raw_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:\n        guidelines: List[Dict[str, Any]] = []\n        for i, row in enumerate(raw_rows):\n            content = row.get(\"content\") or {}\n            if isinstance(content, str):\n                content = json.loads(content)\n\n            pmm_attrs = content.get(\"pmm_attributes\", [])\n            edit_type_entry = next((a for a in pmm_attrs if a.get(\"name\") == \"edit_type\"), None)\n            edit_type_val = None\n            if edit_type_entry:\n                vals = edit_type_entry.get(\"value\", [])\n                edit_type_val = vals[0].get(\"value\") if vals else None\n\n            guidelines.append({\n                \"guideline_id\": row.get(\"guidelineId\") or f\"guideline_{i + 1}\",\n                \"guideline_value\": content.get(\"guideline_value\", \"\"),\n                \"raw_text\": content.get(\"raw_text\", content.get(\"guideline_value\", \"\")),\n                \"expected_outcome\": content.get(\"expected_outcome\", \"\"),\n                \"codes\": content.get(\"codes\", {\"ICD\": [], \"CPT\": [], \"HCPCS\": []}),\n                \"attributes\": content.get(\"attributes\", []),\n                \"chunk_ids\": content.get(\"chunk_ids\") or [],\n                \"customer_policy\": row.get(\"name\"),\n                \"policy_document\": row.get(\"documentNumber\"),\n                \"lyric_pmm_policy\": row.get(\"guidelineName\"),\n                \"sourcing\": row.get(\"sourceName\"),\n                \"edit_type\": edit_type_val,\n                \"category\": row.get(\"category\"),\n            })\n        return guidelines\n\n    def _load_chunks(\n        self,\n        source_id: Optional[str],\n        revision_id: str,\n        file_name: Optional[str],\n    ) -> List[Dict[str, Any]]:\n        if not source_id or not file_name:\n            msg = (\n                f\"Missing source_id or file_name for revision {revision_id} \"\n                f\"(source_id={source_id!r}, file_name={file_name!r})\"\n            )\n            self._logger.error(msg)\n            raise ValueError(msg)\n\n        gcp_path = self._chunks_gcs_path(source_id, revision_id, file_name)\n        try:\n            raw_chunks = self.file_io.read_from_gcs(gcp_path)\n            parsed = (\n                json.loads(raw_chunks.decode(\"utf-8\"))\n                if isinstance(raw_chunks, bytes)\n                else raw_chunks\n            )\n            chunks = parsed if isinstance(parsed, list) else parsed.get(\"chunks\", [])\n        except Exception as chunk_err:\n            msg = f\"Could not load chunks from {gcp_path}: {chunk_err}\"\n            self._logger.error(msg)\n            raise RuntimeError(msg) from chunk_err\n\n        if not chunks:\n            msg = f\"Chunks file at {gcp_path} is empty or has no chunks\"\n            self._logger.error(msg)\n            raise ValueError(msg)\n\n        return chunks\n\n    @classmethod\n    def _chunks_gcs_path(cls, source_id: str, revision_id: str, file_name: str) -> str:\n        \"\"\"GCS key for chunks JSON (policy numbers often contain dots \u2014 avoid Path.stem).\"\"\"\n        return f\"{source_id}/{revision_id}/{file_name}_chunks.json\"\n",
+        "label": "critical",
+        "path": "domain/client_documentation/client_doc/pipeline.py",
+        "reason": "Main workflow orchestrator where sync failures occur; needs error tracking and visibility mechanisms",
+        "tier": 1
+      },
+      {
+        "content": "- class AttributeMappingAgent(BaseAgent): \u2014 Maps extracted guidelines to which attribute extractors to run.\n- def __init__(self, agent_config: ExtractionAgentConfig | None = None):\n- def process(self, text: str, reference_text: Optional[str | dict] = None) -> Dict[str, List[str]]: \u2014 Returns a mapping of guideline_id -> list of attribute keys to extract.\n- def analyze_revision_attribute_changes(\n        self,\n        old_guideline_value: str,\n        old_raw_text: str,\n        new_guideline_value: str,\n        new_raw_text: str,\n    ) -> Dict[str, AttributeStatus]: \u2014 Compare old vs new guideline revision and return per-attribute status.\n- def _normalize_revision_response(self, response: Any) -> Dict[str, AttributeStatus]: \u2014 Parse LLM response into {attr_name: status} dict, filtering invalid values.\n- def _normalize_response(self, response: Any) -> Dict[str, List[str]]:",
+        "label": "relevant",
+        "path": "extraction/agents/attribute_mapping_agent.py",
+        "reason": "Maps guidelines to extractors; failures here cascade to downstream processing",
+        "tier": 2
+      },
+      {
+        "content": "Builds documentation outputs; tangential to sync failure visibility",
+        "label": "peripheral",
+        "path": "domain/client_documentation/client_doc/config.py",
+        "reason": "Builds documentation outputs; tangential to sync failure visibility",
+        "tier": 3
+      },
+      {
+        "content": "PDF parsing utilities; not directly involved in sync orchestration or failure tracking",
+        "label": "peripheral",
+        "path": "tools/pdf/source_parsers.py",
+        "reason": "PDF parsing utilities; not directly involved in sync orchestration or failure tracking",
+        "tier": 3
+      },
+      {
+        "content": "PDF metadata extraction; peripheral to sync failure monitoring and ops visibility",
+        "label": "peripheral",
+        "path": "scraping/extractors/base_pdf_extractor.py",
+        "reason": "PDF metadata extraction; peripheral to sync failure monitoring and ops visibility",
+        "tier": 3
+      }
+    ],
+    "recent_commits": [
+      {
+        "files": [
+          "domain/client_documentation/client_doc/pipeline.py"
+        ],
+        "message": "client documentation changes",
+        "sha": "1338268ae505"
+      },
+      {
+        "files": [
+          "workers/run_workers.py"
+        ],
+        "message": "dropped revision_worker",
+        "sha": "68d936fa9217"
+      },
+      {
+        "files": [
+          "domain/client_documentation/client_doc/pipeline.py"
+        ],
+        "message": "handling the config for all fields in client documentation",
+        "sha": "3516384816aa"
+      },
+      {
+        "files": [
+          "domain/client_documentation/client_doc/pipeline.py"
+        ],
+        "message": "client documentation: change the response according to document type",
+        "sha": "ccffe5dcc50e"
+      },
+      {
+        "files": [
+          "domain/client_documentation/client_doc/pipeline.py"
+        ],
+        "message": "Fix age bound mapping and make claim example filtering deterministic",
+        "sha": "9c08f84a7206"
+      },
+      {
+        "files": [
+          "domain/client_documentation/client_doc/pipeline.py"
+        ],
+        "message": "claim scenario and example generation improvements",
+        "sha": "66a2da10f8ec"
+      },
+      {
+        "files": [
+          "domain/client_documentation/client_doc/pipeline.py"
+        ],
+        "message": "Enhance error handling in ClientDocPipeline by logging detailed error messages and raising exceptions for missing parameters and chunk loading failures. This improves debugging and ensures proper flow control when encountering issues.",
+        "sha": "9dd9d4deaa81"
+      },
+      {
+        "files": [
+          "domain/client_documentation/client_doc/pipeline.py"
+        ],
+        "message": "Refactor EmblemHealthScrapingUtility to extract effective date and update file name during policy preparation. Simplified filename handling in SQL query for clarity.",
+        "sha": "3660214309e4"
+      },
+      {
+        "files": [
+          "workers/run_workers.py"
+        ],
+        "message": "refactor: update .env loading mechanism for consistency",
+        "sha": "5e050f25207b"
+      },
+      {
+        "files": [
+          "domain/client_documentation/client_doc/pipeline.py"
+        ],
+        "message": "refactor: update import paths for client documentation modules",
+        "sha": "90bf8afc6059"
+      }
+    ],
+    "repo_id": 2,
+    "request_type": "feature",
+    "seed_symbols": [],
+    "sha": "9d39113390af6feaca0601a6f5e5ab778b0c88f2",
+    "stats": {
+      "candidate_files": 10,
+      "demotions": 0,
+      "dropped_by_rerank": 0,
+      "dropped_common_names": [],
+      "dropped_for_budget": 0,
+      "entities": {
+        "domains": [
+          "sync",
+          "clinical",
+          "ops"
+        ],
+        "error_strings": [],
+        "files_mentioned": [],
+        "request_type": "feature",
+        "symbols": []
+      },
+      "expansion_candidates": 0,
+      "files_after_expansion": 10,
+      "neighbour_symbols": 0,
+      "reranked": 10,
+      "seed_files": 10,
+      "seed_symbols": 0,
+      "seeds_per_channel": {
+        "domain": 10,
+        "fts": 10,
+        "mention": 0,
+        "symbol": 0,
+        "trigram": 0
+      },
+      "stack_frames_in_index": 0,
+      "stack_frames_parsed": 0,
+      "test_files": 0,
+      "tiers": {
+        "1": 2,
+        "2": 4,
+        "3": 4
+      },
+      "token_count": 7164
+    },
+    "token_count": 7164
+  },
+  "indexed_sha": "9d39113390af6feaca0601a6f5e5ab778b0c88f2",
+  "name": "clinicalops_feature_vague",
+  "repo_root_path": "/Users/anuprasjadhav/PycharmProjects/assure42-clinical-ops",
+  "request": {
+    "attachments": [],
+    "text": "Improve visibility into sync failures for the clinical ops team.",
+    "type": "feature"
+  },
+  "run_id": "cf1614dd-89d3-4a29-9b0e-e579886fe66d",
+  "spec_plan": {
+    "open_questions": [
+      {
+        "default": "Assume plain message formatting only; embed revision_id, job_id, and error_code as explicit tokens in the log message string (e.g. 'revision_id=%s job_id=%s error_code=%s: %s').",
+        "q": "Does the shared logger (shared.logging.get_logger) support structured/extra fields, or only plain message formatting?"
+      },
+      {
+        "default": "Place it at domain/client_documentation/client_doc/test_pipeline.py, colocated with the module under test.",
+        "q": "Should the new pipeline test file live at domain/client_documentation/client_doc/test_pipeline.py or under a top-level tests/ directory?"
+      }
+    ],
+    "plan": {
+      "edges": [
+        {
+          "from_task": "t1",
+          "kind": "code",
+          "to_task": "t2"
+        }
+      ],
+      "tasks": [
+        {
+          "criterion_refs": [
+            "AC1",
+            "AC2",
+            "AC3"
+          ],
+          "description": "In domain/client_documentation/client_doc/pipeline.py, update the generic `except Exception as exc` block inside run_complete_workflow to set error_code='UNEXPECTED_ERROR' on the returned ClientDocumentationCompletionPayload, and update self._logger.error(...) to include revision_id, job_id, and error_code explicitly in the log message/args. Also update the two existing warning/error log calls for REVISION_NOT_COMPLETED and NO_POLICIES to include job_id and their respective error_code in the same explicit style, without changing the error_code string values already returned.",
+          "done_criteria": "run_complete_workflow returns error_code='UNEXPECTED_ERROR' for any uncaught exception, and all three failure branches' log calls include revision_id, job_id, and error_code in their arguments",
+          "est_size": "S",
+          "files": [
+            "domain/client_documentation/client_doc/pipeline.py"
+          ],
+          "id": "t1",
+          "title": "Add UNEXPECTED_ERROR code and structured logging to run_complete_workflow"
+        },
+        {
+          "criterion_refs": [
+            "AC1",
+            "AC2",
+            "AC3"
+          ],
+          "description": "Create domain/client_documentation/client_doc/test_pipeline.py with tests that instantiate ClientDocPipeline, mock _fetch_revision_data and _load_chunks to force each failure path (REVISION_NOT_COMPLETED, NO_POLICIES, and an unexpected exception raised from _load_chunks), and assert on the returned ClientDocumentationCompletionPayload's status/error_code/error_message, and on the arguments passed to the mocked logger (via caplog or a patched self._logger) to confirm revision_id/job_id/error_code appear in the call.",
+          "done_criteria": "New tests fail against the pre-change pipeline.py (missing UNEXPECTED_ERROR code) and pass after t1's change",
+          "est_size": "M",
+          "files": [
+            "domain/client_documentation/client_doc/test_pipeline.py"
+          ],
+          "id": "t2",
+          "title": "Unit test failure payload and log content for run_complete_workflow"
+        }
+      ]
+    },
+    "spec": {
+      "assumptions": [
+        {
+          "confidence": "high",
+          "text": "ClientDocumentationCompletionPayload (domain/entities/client_documentation.py, not shown) already has an error_code field, since it's used for REVISION_NOT_COMPLETED/NO_POLICIES_FOUND today, so adding an UNEXPECTED_ERROR code requires no schema change."
+        },
+        {
+          "confidence": "low",
+          "text": "get_logger's logger (shared.logging, tier not shown) supports passing extra structured fields (e.g. via `extra=` or keyword args) the same way logger.error/warning are already called with %s-style args; if it only supports plain string formatting, the 'structured fields' requirement in AC2/AC3 will be satisfied by including revision_id/job_id/error_code as explicit %s tokens in the message rather than a separate structured payload."
+        },
+        {
+          "confidence": "low",
+          "text": "There is no existing test file for the pipeline (no test_pipeline.py appeared in the pack), so a new tests/... or colocated test_pipeline.py file must be created; colocating it next to pipeline.py matches the module's own package layout since no separate tests/ directory was shown for this domain."
+        }
+      ],
+      "criteria": [
+        {
+          "given": "run_complete_workflow raises an unexpected exception (e.g. _load_chunks raises RuntimeError because the GCS chunks file is missing)",
+          "id": "AC1",
+          "then": "the returned ClientDocumentationCompletionPayload has status='failed', error_code='UNEXPECTED_ERROR', and error_message equal to str(exc)",
+          "verify_by": "unit",
+          "when": "the generic except block in run_complete_workflow handles it"
+        },
+        {
+          "given": "run_complete_workflow raises an unexpected exception",
+          "id": "AC2",
+          "then": "the log call includes revision_id, job_id, and the error_code 'UNEXPECTED_ERROR' as structured fields (not just embedded in a free-text message)",
+          "verify_by": "unit",
+          "when": "the generic except block logs the failure"
+        },
+        {
+          "given": "_fetch_revision_data returns RevisionFetchStatus.REVISION_NOT_COMPLETED or NO_POLICIES",
+          "id": "AC3",
+          "then": "the existing error_code values ('REVISION_NOT_COMPLETED', 'NO_POLICIES_FOUND') are unchanged and the corresponding log call also includes job_id and error_code as structured fields",
+          "verify_by": "unit",
+          "when": "run_complete_workflow builds the failed payload"
+        }
+      ],
+      "non_goals": [
+        "Will not modify workers/run_workers.py because it only starts worker threads and does not own error classification or the completion payload",
+        "Will not modify extraction/agents/clinical_synthesis_agent.py because synthesis failures already propagate as exceptions caught by ClientDocPipeline.run_complete_workflow, which is the single place that needs richer failure reporting",
+        "Will not modify app/utils/pubsub_messages.py because it only constructs outbound message payloads and is not where failure status/error codes are determined"
+      ],
+      "problem_statement": "When ClientDocPipeline.run_complete_workflow (domain/client_documentation/client_doc/pipeline.py) fails, the only trace is a log line written via self._logger.error/warning; the returned ClientDocumentationCompletionPayload carries error_code/error_message but these are only ever set for REVISION_NOT_COMPLETED and NO_POLICIES_FOUND \u2014 any unexpected exception (chunk load failure, DB error, synthesis error) is caught in the generic except block and returned with error_message set but no error_code, so the clinical ops team cannot distinguish failure types from the callback payload alone. Done means every failure path sets a stable error_code plus error_message on the completion payload, and each failure branch logs which revision/job/guideline failed with enough structured detail (revision_id, job_id, error_code) that ops can query/filter failures from logs.",
+      "touchable_files": [
+        "domain/client_documentation/client_doc/pipeline.py",
+        "domain/client_documentation/client_doc/test_pipeline.py"
+      ]
+    }
+  },
+  "validation": {
+    "checks": [
+      {
+        "details": [],
+        "name": "path_validity",
+        "passed": true
+      },
+      {
+        "details": [],
+        "name": "criteria_wellformed",
+        "passed": true
+      },
+      {
+        "details": [],
+        "name": "scope_consistency",
+        "passed": true
+      },
+      {
+        "details": [],
+        "name": "edge_augmentation",
+        "passed": true
+      },
+      {
+        "details": [],
+        "name": "dag_acyclic",
+        "passed": true
+      },
+      {
+        "details": [],
+        "name": "traceability",
+        "passed": true
+      },
+      {
+        "details": [],
+        "name": "test_coverage",
+        "passed": true
+      }
+    ],
+    "escalation": null,
+    "passed": true,
+    "repair_attempts": 0
+  }
+}

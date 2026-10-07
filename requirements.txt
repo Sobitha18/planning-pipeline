@@ -1,0 +1,14 @@
+tree-sitter==0.26.0
+tree-sitter-python==0.25.0
+tree-sitter-typescript==0.23.2
+sqlalchemy
+psycopg[binary]
+pathspec
+pytest
+anthropic
+pydantic
+fastapi
+uvicorn
+httpx
+python-dotenv
+claude-agent-sdk

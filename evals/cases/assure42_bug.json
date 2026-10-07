@@ -1,0 +1,349 @@
+{
+  "context_pack": {
+    "files": [
+      {
+        "content": "- export type WorkflowFilterOption = {\n  id: string\n  name: string\n  isUpdateWorkflow: boolean\n  mapping?: { name: string } | null\n}\n- export function useDocumentReportsData()",
+        "label": "relevant",
+        "path": "src/features/analytics/documents/components/hooks/useDocumentReportsData.ts",
+        "reason": "Manages report data state; sorting logic likely invoked here",
+        "tier": 2
+      },
+      {
+        "content": "- export default function DocumentReportsPage()",
+        "label": "relevant",
+        "path": "src/features/analytics/documents/components/DocumentReportsPage.tsx",
+        "reason": "Main page component orchestrating reports; likely contains table with sorting",
+        "tier": 2
+      },
+      {
+        "content": "import { prisma } from \"@/lib/prisma\"\nimport type { DocumentReportsQueryResult, SourceMeta, WorkflowStepMeta } from \"../types\"\nimport { buildDocumentReportsQuery } from \"./query-builders\"\n\n// ============================================================================\n// Queries\n// ============================================================================\n\nexport async function queryWorkflowSteps(): Promise<WorkflowStepMeta[]> {\n  return prisma.workflowStep.findMany({\n    select: { id: true, name: true, stepType: true },\n  })\n}\n\nexport async function queryAvailableSources(): Promise<SourceMeta[]> {\n  return prisma.source.findMany({\n    select: { sourceName: true },\n    distinct: [\"sourceName\"],\n    orderBy: { sourceName: \"asc\" },\n  })\n}\n\nexport async function queryDocumentReports(args: {\n  dateRange?: { from: Date; to: Date }\n  sourceName?: string\n  workflowId?: string\n}): Promise<DocumentReportsQueryResult[]> {\n  return prisma.$queryRaw<DocumentReportsQueryResult[]>(buildDocumentReportsQuery(args))\n}\n",
+        "label": "critical",
+        "path": "src/features/analytics/documents/queries/document-reports.ts",
+        "reason": "Queries document reports; null date handling occurs at data source level",
+        "tier": 1
+      },
+      {
+        "content": "Filters bar; not directly involved in table sorting logic",
+        "label": "peripheral",
+        "path": "src/features/analytics/documents/components/DocumentReportsFiltersBar.tsx",
+        "reason": "Filters bar; not directly involved in table sorting logic",
+        "tier": 3
+      },
+      {
+        "content": "retained as seed (rerank said irrelevant: Authentication and action wrapper; unrelated to date sorting in reports)",
+        "label": "peripheral",
+        "path": "src/lib/server-actions.ts",
+        "reason": "retained as seed (rerank said irrelevant: Authentication and action wrapper; unrelated to date sorting in reports)",
+        "tier": 3
+      },
+      {
+        "content": "retained as seed (rerank said irrelevant: Reports management page; unrelated to document reports sorting issue)",
+        "label": "peripheral",
+        "path": "src/app/(protected)/privileged/(report)/rp/page.tsx",
+        "reason": "retained as seed (rerank said irrelevant: Reports management page; unrelated to document reports sorting issue)",
+        "tier": 3
+      },
+      {
+        "content": "retained as seed (rerank said irrelevant: Guideline document preview; unrelated to analytics document reports)",
+        "label": "peripheral",
+        "path": "src/features/guidelines/guideline-repository/components/ClientFacingDocPreview.tsx",
+        "reason": "retained as seed (rerank said irrelevant: Guideline document preview; unrelated to analytics document reports)",
+        "tier": 3
+      },
+      {
+        "content": "retained as seed (rerank said irrelevant: Workflow step details; unrelated to document reports table sorting)",
+        "label": "peripheral",
+        "path": "src/features/workflow/components/StepDetailsTabs.tsx",
+        "reason": "retained as seed (rerank said irrelevant: Workflow step details; unrelated to document reports table sorting)",
+        "tier": 3
+      },
+      {
+        "content": "retained as seed (rerank said irrelevant: Guideline type definitions; unrelated to document reports)",
+        "label": "peripheral",
+        "path": "src/shared/types/guideline.ts",
+        "reason": "retained as seed (rerank said irrelevant: Guideline type definitions; unrelated to document reports)",
+        "tier": 3
+      },
+      {
+        "content": "- model Account {\n  id                String  @id @default(cuid())\n  userId            String\n  type              String\n  provider          String\n  providerAccountId String\n  refresh_token     String? @db.Text\n  access_token      String? @db.Text\n  expires_at        Int?\n  ext_expires_in    Int?\n  token_type        String?\n  scope             String?\n  id_token          String? @db.Text\n  session_state     String?\n\n  user User @relation(fields: [userId], references: [id], onDelete: Cascade)\n\n  @\u2026\n- model Session {\n  id           String   @id @default(cuid())\n  sessionToken String   @unique\n  userId       String\n  expires      DateTime\n  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)\n}\n- model User {\n  id            String    @id @default(cuid())\n  name          String?\n  email         String    @unique\n  emailVerified DateTime?\n  image         String?\n  password      String? // For credentials provider\n  ssoLinkedAt   DateTime?\n  passwordLoginDisabled  Boolean @default(false)\n\n  role          UserRole  @default(CODER) // DEPRECATED: Will be removed after migration\n  isActive      Boolean   @default(true)\n  createdAt     DateTime  @default(now())\n  updatedAt     DateTime  @updat\u2026\n- model VerificationToken {\n  identifier String\n  token      String   @unique\n  expires    DateTime\n\n  @@unique([identifier, token])\n}\n- model Customer {\n  id        String       @id @default(cuid())\n  name      String\n  email     String?\n  phone     String?\n  address   String?\n  type      CustomerType @default(COMMERCIAL)\n  isActive  Boolean      @default(true)\n  createdAt DateTime     @default(now())\n  updatedAt DateTime     @updatedAt\n\n  // Relations\n  customerSources CustomerSource[]\n}\n- model Source {\n  id                   String            @id @default(cuid())\n  sourceName           String\n  config               Json\n  cronExpression       String\n  createdById          String\n  status               SourceStatus      @default(ACTIVE)\n  createdAt            DateTime          @default(now())\n  updatedAt            DateTime          @updatedAt\n  lastRun              DateTime?\n  nextRun              DateTime\n  documentTypes        DocumentCategory[]  // Main document type this sou\u2026\n- model Tag {\n  id        String   @id @default(cuid())\n  name      String\n  slug      String   @unique\n  createdAt DateTime @default(now())\n  updatedAt DateTime @updatedAt\n\n  // Relations\n  sourceTags SourceTag[]\n\n  @@index([name])\n}\n- model SourceJobQueue {\n  id          String    @id @default(cuid())\n  sourceId    String\n  payload     Json // Information to be used by worker\n  status      JobStatus @default(PENDING)\n  result      Json? // JSON output from job execution. This should have number of docs fetched, ignored\n  error       Json?\n  progress    Json[] // JSON array tracking progress steps\n  startedAt   DateTime?\n  completedAt DateTime?\n  createdAt   DateTime  @default(now())\n  updatedAt   DateTime  @updatedAt\n\n  // Re\u2026\n- model CustomerSource {\n  id         String   @id @default(cuid())\n  customerId String\n  sourceId   String\n  createdAt  DateTime @default(now())\n  updatedAt  DateTime @updatedAt\n\n  // Relations\n  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)\n  source   Source   @relation(fields: [sourceId], references: [id], onDelete: Cascade)\n\n  @@unique([customerId, sourceId])\n  @@index([customerId, createdAt])\n  @@index([sourceId, createdAt])\n}\n- model SourceTag {\n  id        String   @id @default(cuid())\n  sourceId  String\n  tagId     String\n  createdAt DateTime @default(now())\n  updatedAt DateTime @updatedAt\n\n  // Relations\n  source Source @relation(fields: [sourceId], references: [id], onDelete: Cascade)\n  tag    Tag    @relation(fields: [tagId], references: [id], onDelete: Cascade)\n\n  @@unique([sourceId, tagId])\n  @@index([sourceId, createdAt])\n  @@index([tagId, createdAt])\n}\n- model Document {\n  id                 String           @id @default(cuid())\n  documentNumber     String?\n  category           DocumentCategory\n  categoryConfidence Float?\n  name               String\n  activeRevisionId   String?          @unique // Points to the latest/active revision\n  createdAt          DateTime         @default(now())\n  updatedAt          DateTime         @updatedAt\n\n  // Relations\n  revisions                   DocumentRevision[]            @relation(\"DocumentRevisions\")\n  act\u2026\n- model DocumentRevision {\n  id                   String                 @id @default(cuid())\n  sourceJobId          String\n  documentId           String\n  effectiveDate        DateTime\n  revisionDate         DateTime?                                // Latest revision-log date (e.g. EmblemHealth Revision History DATE column); used to detect new revisions when the effective date is unchanged\n  validTill            DateTime?\n  numberOfPages        Int?\n  publishedOn          DateTime?\n  filename    \u2026",
+        "label": "relevant",
+        "path": "prisma/schema.prisma",
+        "reason": "Schema defines DocumentRevision with date fields; null constraints visible here",
+        "tier": 2
+      },
+      {
+        "content": "retained as seed (rerank said irrelevant: PPT generation service; unrelated to document reports sorting)",
+        "label": "peripheral",
+        "path": "src/features/guidelines/guideline-repository/services/clientFacingPptService.ts",
+        "reason": "retained as seed (rerank said irrelevant: PPT generation service; unrelated to document reports sorting)",
+        "tier": 3
+      },
+      {
+        "content": "- export const credentialsSchema = z.object({\n  email: z.string().email('Invalid email address'),\n  password: z.string().min(6, 'Password must be at least 6 characters'),\n})\n- export const registerSchema = z.object({\n  email: z.string().email('Invalid email address'),\n  password: z.string().min(6, 'Password must be at least 6 characters'),\n  name: z.string().min(2, 'Name must be at least 2 characters').optional(),\n})\n- export const loginSchema = z.object({\n  email: z.string().email('Invalid email address'),\n  password: z.string().min(6, 'Password must be at least 6 characters'),\n})\n- export const updateProfileSchema = z.object({\n  name: z.string().min(2, 'Name must be at least 2 characters').optional(),\n  bio: z.string().max(500, 'Bio must be less than 500 characters').optional(),\n  location: z.string().max(100, 'Location must be less than 100 characters').optional(),\n  website: z.string().url('Invalid URL').optional().or(z.literal('')),\n})\n- export const userPreferencesSchema = z.object({\n  theme: z.enum(['light', 'dark', 'system']),\n  notifications: z.object({\n    email: z.boolean(),\n    push: z.boolean(),\n    marketing: z.boolean(),\n  }),\n  privacy: z.object({\n    profileVisible: z.boolean(),\n    emailVisible: z.boolean(),\n  }),\n})\n- export const paginationSchema = z.object({\n  page: z.coerce.number().min(1).default(1),\n  limit: z.coerce.number().min(1).max(100).default(10),\n  sortBy: z.string().optional(),\n  sortOrder: z.enum(['asc', 'desc']).default('desc'),\n})\n- export const searchSchema = paginationSchema.extend({\n  query: z.string().optional(),\n  filters: z.record(z.string(), z.string()).optional(),\n})\n- export const documentReportsQuerySchema = z.object({\n  dateRange: z.object({\n    from: z.date(),\n    to: z.date(),\n  }).optional(),\n  sourceName: z.string().optional(),\n  workflowId: z.string().optional(),\n})\n- export const workflowMetricsQuerySchema = z.object({\n  dateRange: z.object({\n    from: z.coerce.date(),\n    to: z.coerce.date(),\n  }).optional(),\n  startDate: z.string().optional(),\n  endDate: z.string().optional(),\n  page: z.number().int().positive().optional().default(1),\n  pageSize: z.number().int().positive().optional().default(25),\n  role: z.enum([UserRole.REVIEWER, UserRole.CODER, UserRole.ICD_CODER]),\n  workflowId: z.string().optional(),\n})\n- export const userCategoryBreakdownQuerySchema = z.object({\n  roleId: z.string().min(1),\n  workflowId: z.string().min(1),\n}) \u2014 Lazy-load category breakdown (classification pipeline) for one assignee role.\n- export const exportGuidelinesByCategorySchema = z.object({\n  userId: z.string(),\n  userName: z.string(),\n  userEmail: z.string(),\n  role: z.string(),\n  guidelinesByCategory: z.array(\n    z.object({\n      category: z.string(),\n      total: z.number(),\n      /** Coder/developed count (accepted on assignee runs). */\n      accepted: z.number(),\n      /** Reviewer / final accepted count when provided (defaults to accepted in export). */\n      finalAccepted: z.number().optional(),\n      rejected: z.nu\u2026\n- export const performanceAnalyticsQuerySchema = z.object({\n  dateRange: z.object({\n    from: z.date(),\n    to: z.date(),\n  }).optional(),\n  includeCustomAttributes: z.boolean().optional().default(false),\n  workflowId: z.string().optional(),\n})",
+        "label": "relevant",
+        "path": "src/lib/schemas.ts",
+        "reason": "Defines documentReportsQuerySchema validation; may need date handling updates",
+        "tier": 2
+      },
+      {
+        "content": "retained as seed (rerank said irrelevant: Excel viewer component; unrelated to reports table sorting)",
+        "label": "peripheral",
+        "path": "src/features/excel-viewer/ExcelViewerCore.tsx",
+        "reason": "retained as seed (rerank said irrelevant: Excel viewer component; unrelated to reports table sorting)",
+        "tier": 3
+      },
+      {
+        "content": "retained as seed (rerank said irrelevant: Development notes component; unrelated to document reports)",
+        "label": "peripheral",
+        "path": "src/features/guidelines/guideline-details/components/sections/development-notes/DevelopmentNotes.tsx",
+        "reason": "retained as seed (rerank said irrelevant: Development notes component; unrelated to document reports)",
+        "tier": 3
+      },
+      {
+        "content": "Export service uses same query; sorting issue may affect export",
+        "label": "peripheral",
+        "path": "src/features/analytics/documents/export-service.ts",
+        "reason": "Export service uses same query; sorting issue may affect export",
+        "tier": 3
+      },
+      {
+        "content": "- export type WorkflowStepCountResult = {\n  step_name: string\n  step_type: string\n  total_documents: number\n  backlog_documents: number\n  processing_documents: number\n  completed_documents: number\n  source_breakdown: Array<{\n    sourceName: string\n    backlog: number\n    processing: number\n    completed: number\n  }>\n}\n- export type DocumentByCategoryResult = {\n  category: string\n  count: number\n}\n- export type GuidelineCategoryMetricResult = {\n  category: string\n  total_guidelines: number\n  accepted: number\n  rejected: number\n  pending: number\n  acceptance_rate: number\n}\n- export type DocumentBySourceResult = {\n  sourceName: string\n  documentCount: number\n  guidelinesCount: number\n  completedReviews: number\n}\n- export type DocumentReportsQueryResult = {\n  workflow_step_counts: WorkflowStepCountResult[] | null\n  documents_by_category: DocumentByCategoryResult[] | null\n  guideline_category_metrics: GuidelineCategoryMetricResult[] | null\n  documents_by_source: DocumentBySourceResult[] | null\n  total_documents: bigint\n  total_guidelines: bigint\n  total_accepted: bigint\n  total_rejected: bigint\n  total_pending: bigint\n}\n- export type WorkflowStepMeta = {\n  id: string\n  name: string\n  stepType: string\n}\n- export type SourceMeta = {\n  sourceName: string\n}\n- export interface SourceStatusBreakdown\n- export interface WorkflowStepDocumentCount\n- export interface GuidelineCategoryMetrics\n- export interface GuidelinesMetrics\n- export interface DocumentsBySource",
+        "label": "relevant",
+        "path": "src/features/analytics/documents/types.ts",
+        "reason": "Defines DocumentReportsQueryResult type; date field handling relevant here",
+        "tier": 2
+      },
+      {
+        "content": "\"use server\"\n\nimport { privilegedAction } from \"@/lib/server-actions\"\nimport { documentReportsQuerySchema } from \"./schemas\"\nimport { fetchDocumentReportsData } from \"./service\"\nimport { exportDocumentReportsToExcelService } from \"./export-service\"\n\nexport const getDocumentReports = privilegedAction\n  .inputSchema(documentReportsQuerySchema)\n  .action(async ({ parsedInput }) => {\n    const { dateRange, sourceName, workflowId } = parsedInput || {}\n    const data = await fetchDocumentReportsData({ dateRange, sourceName, workflowId })\n    return { data }\n  })\n\nexport const exportDocumentReportsToExcel = privilegedAction\n  .inputSchema(documentReportsQuerySchema)\n  .action(async ({ parsedInput }) => {\n    const { dateRange, sourceName, workflowId } = parsedInput || {}\n    return exportDocumentReportsToExcelService({ dateRange, sourceName, workflowId })\n  })\n",
+        "label": "critical",
+        "path": "src/features/analytics/documents/actions.ts",
+        "reason": "Server actions for document reports; data fetching entry point",
+        "tier": 1
+      },
+      {
+        "content": "Overview cards display; not involved in table sorting",
+        "label": "peripheral",
+        "path": "src/features/analytics/documents/components/DocumentOverviewCards.tsx",
+        "reason": "Overview cards display; not involved in table sorting",
+        "tier": 3
+      },
+      {
+        "content": "Workflow steps section; may contain sortable content but not primary table",
+        "label": "peripheral",
+        "path": "src/features/analytics/documents/components/WorkflowStepsSection.tsx",
+        "reason": "Workflow steps section; may contain sortable content but not primary table",
+        "tier": 3
+      }
+    ],
+    "recent_commits": [
+      {
+        "files": [
+          "src/features/analytics/documents/queries/document-reports.ts"
+        ],
+        "message": "implement loading states and UI improvements for UserMetricsPage and refactor analytics query structure",
+        "sha": "9da0de6dbc38"
+      },
+      {
+        "files": [
+          "src/features/analytics/documents/actions.ts"
+        ],
+        "message": "analytics code refactor",
+        "sha": "7e87228b0fa2"
+      }
+    ],
+    "repo_id": 1,
+    "request_type": "bug",
+    "seed_symbols": [
+      "features.analytics.documents.components.DocumentReportsFiltersBar.DocumentReportsFiltersBar",
+      "features.analytics.documents.components.DocumentReportsFiltersBar.Props",
+      "features.analytics.documents.components.DocumentReportsPage.DocumentReportsPage",
+      "features.analytics.documents.components.hooks.useDocumentReportsData.WorkflowFilterOption",
+      "features.analytics.documents.components.hooks.useDocumentReportsData.useDocumentReportsData",
+      "features.analytics.documents.queries.document-reports.queryAvailableSources",
+      "features.analytics.documents.queries.document-reports.queryDocumentReports",
+      "features.analytics.documents.queries.document-reports.queryWorkflowSteps"
+    ],
+    "sha": "a7a668f8d9c0235bfe0e1b188c47a33b5d4d8082",
+    "stats": {
+      "candidate_files": 24,
+      "demotions": 0,
+      "dropped_by_rerank": 1,
+      "dropped_common_names": [],
+      "dropped_for_budget": 0,
+      "entities": {
+        "domains": [
+          "reports"
+        ],
+        "error_strings": [],
+        "files_mentioned": [],
+        "request_type": "bug",
+        "symbols": [
+          "reports"
+        ]
+      },
+      "expansion_candidates": 5,
+      "files_after_expansion": 20,
+      "neighbour_symbols": 14,
+      "reranked": 20,
+      "seed_files": 15,
+      "seed_symbols": 8,
+      "seeds_per_channel": {
+        "domain": 10,
+        "fts": 10,
+        "mention": 0,
+        "symbol": 10,
+        "trigram": 0
+      },
+      "stack_frames_in_index": 0,
+      "stack_frames_parsed": 0,
+      "test_files": 0,
+      "tiers": {
+        "1": 2,
+        "2": 5,
+        "3": 12
+      },
+      "token_count": 3660
+    },
+    "token_count": 3660
+  },
+  "indexed_sha": "a7a668f8d9c0235bfe0e1b188c47a33b5d4d8082",
+  "name": "assure42_bug",
+  "repo_root_path": "/Users/anuprasjadhav/PycharmProjects/assure42",
+  "request": {
+    "attachments": [],
+    "text": "Sorting by date on the reports table throws a client error when some rows have a null date.",
+    "type": "bug"
+  },
+  "run_id": "2a7b7a3d-cc4c-4daa-aa0c-b4adca526ab3",
+  "spec_plan": {
+    "open_questions": [
+      {
+        "default": "Assume the comparator is defined and exported (or at least testable) from useDocumentReportsData.ts, since its docstring identifies it as the likely location of sorting logic.",
+        "q": "Is the date sort comparator defined inline inside useDocumentReportsData.ts, or is it passed in from/shared with DocumentReportsPage.tsx (e.g. as a column definition for a table library)?"
+      }
+    ],
+    "plan": {
+      "edges": [
+        {
+          "from_task": "t1",
+          "kind": "code",
+          "to_task": "t2"
+        }
+      ],
+      "tasks": [
+        {
+          "criterion_refs": [
+            "AC1",
+            "AC2"
+          ],
+          "description": "In src/features/analytics/documents/components/hooks/useDocumentReportsData.ts, locate the sort comparator used for date columns and update it to handle null/undefined values explicitly: treat missing dates as always sorting after valid dates in both ascending and descending order, and avoid calling .getTime() or arithmetic directly on a possibly-null value.",
+          "done_criteria": "Calling the date comparator with a mix of null, undefined, and valid Date values returns a sorted array without throwing, and rows with null dates are consistently placed last",
+          "est_size": "S",
+          "files": [
+            "src/features/analytics/documents/components/hooks/useDocumentReportsData.ts"
+          ],
+          "id": "t1",
+          "title": "Guard date comparator against null values"
+        },
+        {
+          "criterion_refs": [
+            "AC1",
+            "AC2"
+          ],
+          "description": "Add src/features/analytics/documents/components/hooks/useDocumentReportsData.test.ts covering the date comparator/sort function with cases: all valid dates, some null, some undefined, and all null, for both ascending and descending order. Assert no exception is thrown and the resulting order places null/undefined consistently.",
+          "done_criteria": "New test suite passes against the fixed comparator and fails (throws) against the pre-fix implementation",
+          "est_size": "S",
+          "files": [
+            "src/features/analytics/documents/components/hooks/useDocumentReportsData.test.ts"
+          ],
+          "id": "t2",
+          "title": "Unit test null-safe date sorting"
+        }
+      ]
+    },
+    "spec": {
+      "assumptions": [
+        {
+          "confidence": "low",
+          "text": "The sort comparator for date columns lives inside useDocumentReportsData.ts (per its tier-2 docstring 'sorting logic likely invoked here') and is a plain JS function comparing two row values, not a third-party grid library's built-in sorter."
+        },
+        {
+          "confidence": "high",
+          "text": "The fix should treat null/undefined dates as sorting after all valid dates in both asc and desc order (a common convention), rather than adding a separate UI toggle for null placement."
+        },
+        {
+          "confidence": "high",
+          "text": "A new test file useDocumentReportsData.test.ts does not yet exist in the pack and needs to be created alongside the hook, following the repo's convention of colocating hook tests, to unit-test the comparator in isolation."
+        }
+      ],
+      "criteria": [
+        {
+          "given": "the document reports table is rendered with rows where some date field values are null and others are valid Date/ISO values",
+          "id": "AC1",
+          "then": "the sort completes without throwing a client error and returns an array of the same length with rows containing null dates placed consistently (e.g. always last) relative to rows with valid dates",
+          "verify_by": "unit",
+          "when": "the user triggers a sort on that date column (ascending or descending)"
+        },
+        {
+          "given": "a mixed array of report rows with null, undefined, and valid date values for the sorted field",
+          "id": "AC2",
+          "then": "it returns a stable, error-free ordering with no thrown exception and no NaN comparisons",
+          "verify_by": "unit",
+          "when": "the sort comparator function used by useDocumentReportsData is called directly with these rows"
+        }
+      ],
+      "non_goals": [
+        "Will not modify prisma/schema.prisma because the nullable date columns are intentional business fields, not a schema defect",
+        "Will not modify src/features/analytics/documents/queries/document-reports.ts because the null dates originate from legitimate missing data upstream, not from the query construction",
+        "Will not modify src/features/analytics/documents/export-service.ts because the reported error is a client-side sorting crash in the table UI, not the export flow"
+      ],
+      "problem_statement": "The reports table in src/features/analytics/documents/components/DocumentReportsPage.tsx throws a client-side error when sorting by a date column that contains null values (e.g. DocumentRevision.revisionDate, validTill, or publishedOn are optional per prisma/schema.prisma). The sort logic in useDocumentReportsData.ts likely calls a date comparison (e.g. .getTime() or direct comparison) without guarding for null/undefined, causing a runtime TypeError. Done means sorting any date column completes without throwing, with null dates consistently ordered (placed last regardless of sort direction).",
+      "touchable_files": [
+        "src/features/analytics/documents/components/hooks/useDocumentReportsData.ts",
+        "src/features/analytics/documents/components/hooks/useDocumentReportsData.test.ts"
+      ]
+    }
+  },
+  "validation": {
+    "checks": [
+      {
+        "details": [],
+        "name": "path_validity",
+        "passed": true
+      },
+      {
+        "details": [],
+        "name": "criteria_wellformed",
+        "passed": true
+      },
+      {
+        "details": [],
+        "name": "scope_consistency",
+        "passed": true
+      },
+      {
+        "details": [],
+        "name": "edge_augmentation",
+        "passed": true
+      },
+      {
+        "details": [],
+        "name": "dag_acyclic",
+        "passed": true
+      },
+      {
+        "details": [],
+        "name": "traceability",
+        "passed": true
+      },
+      {
+        "details": [],
+        "name": "test_coverage",
+        "passed": true
+      }
+    ],
+    "escalation": null,
+    "passed": true,
+    "repair_attempts": 0
+  }
+}

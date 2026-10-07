@@ -1,0 +1,361 @@
+{
+  "context_pack": {
+    "files": [
+      {
+        "content": "\"use client\";\n\nimport { useState } from \"react\";\nimport { Button } from \"@/components/ui/button\";\nimport {\n  DocumentArrowDownIcon,\n  CheckCircleIcon,\n  ExclamationTriangleIcon\n} from '@heroicons/react/24/outline';\nimport { useAction } from \"next-safe-action/hooks\";\n\n/**\n * Reusable Export Button Component with green styling\n * Same design as Guidelines Repository export button\n *\n * @example Basic usage\n * <ExportButton\n *   action={exportDocumentReportsToExcel}\n *   params={{ dateRange, sourceName }}\n *   label=\"Export to Excel\"\n * />\n *\n * @example With custom handlers\n * <ExportButton\n *   action={exportUserMetrics}\n *   params={{ dateRange }}\n *   onSuccess={(result) => console.log('Success!')}\n *   disabled={isLoading}\n * />\n */\n\n// Type for export action response\ntype ExportActionResult = {\n  data?: {\n    file?: string;\n    fileBase64?: string;\n    filename?: string;\n    fileName?: string;\n  } | string;\n};\n\ninterface ExportButtonProps<TParams extends Record<string, unknown>> {\n  /** The server action to execute for export */\n  // eslint-disable-next-line @typescript-eslint/no-explicit-any\n  action: any;\n\n  /** Parameters to pass to the action */\n  params: TParams;\n\n  /** Button label (default: \"Export to Excel\") */\n  label?: string;\n\n  /** Disabled state */\n  disabled?: boolean;\n\n  /** Custom success handler */\n  onSuccess?: (result: ExportActionResult) => void;\n\n  /** Custom error handler */\n  onError?: (error: unknown) => void;\n\n  /** Additional button classes */\n  className?: string;\n}\n\nexport function ExportButton<TParams extends Record<string, unknown>>({\n  action,\n  params,\n  label = \"Export to Excel\",\n  disabled = false,\n  onSuccess,\n  onError,\n  className = \"\",\n}: ExportButtonProps<TParams>) {\n  const [isExporting, setIsExporting] = useState(false);\n  const [showSuccess, setShowSuccess] = useState(false);\n  const [showError, setShowError] = useState(false);\n  const [errorMessage, setErrorMessage] = useState<string>(\"\");\n\n  const { execute: exportAction, isExecuting } = useAction(action, {\n    onSuccess: (result: ExportActionResult) => {\n      try {\n        //console.log('[ExportButton] onSuccess called with result:', result);\n\n        // Extract file data from common response patterns\n        // Pattern 1: { data: { file, filename } }\n        // Pattern 2: { data: \"base64string\" }\n        let fileData: string | undefined;\n        let fileName = 'export.xlsx';\n\n        if (typeof result?.data === 'string') {\n          // Pattern 2: data is directly a base64 string\n          //console.log('[ExportButton] Pattern 2: data is string, length:', result.data.length);\n          fileData = result.data;\n        } else if (result?.data && typeof result.data === 'object') {\n          // Pattern 1: data is an object with file and filename properties\n          //console.log('[ExportButton] Pattern 1: data is object');\n          fileData = result.data.file || result.data.fileBase64;\n          fileName = result.data.filename || result.data.fileName || 'export.xlsx';\n          //console.log('[ExportButton] Extracted fileData length:', fileData?.length, 'fileName:', fileName);\n        }\n\n        if (fileData) {\n          //console.log('[ExportButton] Processing fileData, length:', fileData.length);\n          // Convert base64 to blob and create download link\n          const byteCharacters = atob(fileData);\n          const byteNumbers = new Array(byteCharacters.length);\n          for (let i = 0; i < byteCharacters.length; i++) {\n            byteNumbers[i] = byteCharacters.charCodeAt(i);\n          }\n          const byteArray = new Uint8Array(byteNumbers);\n\n          // Determine MIME type based on file extension\n          const mimeType = fileName?.endsWith('.csv')\n            ? 'text/csv'\n            : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';\n\n          const blob = new Blob([byteArray], { type: mimeType });\n\n          // Create download link\n          const url = window.URL.createObjectURL(blob);\n          const link = document.createElement('a');\n          link.href = url;\n          link.download = fileName || 'export.xlsx';\n          document.body.appendChild(link);\n          link.click();\n          document.body.removeChild(link);\n          window.URL.revokeObjectURL(url);\n\n          // Show success state briefly\n          setShowSuccess(true);\n          setTimeout(() => setShowSuccess(false), 2000);\n\n          //console.log('[ExportButton] Download triggered successfully');\n\n          // Call custom success handler if provided\n          onSuccess?.(result);\n        } else {\n          console.error('[ExportButton] No fileData found in result!');\n          console.error('[ExportButton] result?.data:', result?.data);\n        }\n      } catch (error) {\n        console.error('[ExportButton] Export processing error:', error);\n        if (process.env.NODE_ENV === 'development') {\n          console.error('[ExportButton] Full error details:', error);\n        }\n        setErrorMessage(\"Failed to process export data\");\n        setShowError(true);\n        setTimeout(() => {\n          setShowError(false);\n          setErrorMessage(\"\");\n        }, 5000);\n      } finally {\n        setIsExporting(false);\n      }\n    },\n    onError: (error: unknown) => {\n      console.error('[ExportButton] onError called with error:', error);\n      // Log error in development only\n      if (process.env.NODE_ENV === 'development') {\n        console.error('[ExportButton] Export failed (dev mode):', error);\n      }\n\n      // Determine user-friendly error message\n      let userMessage = \"Export failed. Please try again.\";\n\n      try {\n        // Type guard for error object\n        const isErrorObject = (obj: unknown): obj is Record<string, unknown> => {\n          return typeof obj === 'object' && obj !== null;\n        };\n\n        if (isErrorObject(error)) {\n          if ((error.error as Record<string, unknown>)?.serverError) {\n            userMessage = \"Server error occurred during export.\";\n          } else if ((error.error as Record<string, unknown>)?.validationErrors) {\n            userMessage = \"Invalid data detected. Please check your selection.\";\n          } else if (error.error && typeof error.error === 'string') {\n            // Handle string error messages\n            const errorStr = error.error.toLowerCase();\n            if (errorStr.includes('network')) {\n              userMessage = \"Network error. Please check your connection.\";\n            } else if (errorStr.includes('permission')) {\n              userMessage = \"You don't have permission to export.\";\n            } else if (errorStr.includes('not found')) {\n              userMessage = \"Data not found. Please refresh and try again.\";\n            }\n          } else if (error.serverError) {\n            userMessage = \"Server error occurred during export.\";\n          } else if (error.validationErrors) {\n            userMessage = \"Invalid data detected. Please check your selection.\";\n          }\n        }\n      } catch (parseError) {\n        if (process.env.NODE_ENV === 'development') {\n          console.error('Error parsing export error:', parseError);\n        }\n        userMessage = \"Export failed. Please try again.\";\n      }\n\n      setErrorMessage(userMessage);\n      setShowError(true);\n\n      // Auto-hide error after 5 seconds\n      setTimeout(() => {\n        setShowError(false);\n        setErrorMessage(\"\");\n      }, 5000);\n\n      setIsExporting(false);\n\n      // Call custom error handler if provided\n      onError?.(error);\n    }\n  });\n\n  const handleExport = async () => {\n    //console.log('[ExportButton] handleExport called with params:', params);\n\n    if (disabled || isLoading) {\n      //console.log('[ExportButton] Export blocked - disabled or isLoading');\n      return;\n    }\n\n    // Clear any previous states\n    setShowError(false);\n    setShowSuccess(false);\n    setErrorMessage(\"\");\n    setIsExporting(true);\n\n    try {\n      //console.log('[ExportButton] Calling exportAction...');\n      await exportAction(params);\n      //console.log('[ExportButton] exportAction completed');\n    } catch (error) {\n      //console.error('[ExportButton] Caught error in handleExport:', error);\n      if (process.env.NODE_ENV === 'development') {\n        console.error('[ExportButton] Export error (dev mode):', error);\n      }\n\n      // Set error state for user feedback\n      setErrorMessage(\"An unexpected error occurred during export.\");\n      setShowError(true);\n\n      // Auto-hide error after 5 seconds\n      setTimeout(() => {\n        setShowError(false);\n        setErrorMessage(\"\");\n      }, 5000);\n\n      setIsExporting(false);\n    }\n  };\n\n  const isLoading = isExporting || isExecuting;\n\n  return (\n    <div className=\"relative\">\n      <Button\n        onClick={handleExport}\n        disabled={disabled || isLoading}\n        size=\"sm\"\n        className={`text-white shadow-md hover:shadow-lg transition-all duration-200 ${showError\n            ? 'bg-red-600 hover:bg-red-700'\n            : showSuccess\n              ? 'bg-green-600 hover:bg-green-700'\n              : 'bg-emerald-600 hover:bg-emerald-700'\n          } ${className}`}\n        title={showError ? errorMessage : label}\n      >\n        {isLoading ? (\n          <>\n            <div className=\"animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2\"></div>\n            Exporting...\n          </>\n        ) : showError ? (\n          <>\n            <ExclamationTriangleIcon className=\"h-4 w-4 mr-2\" />\n            Export Failed\n          </>\n        ) : showSuccess ? (\n          <>\n            <CheckCircleIcon className=\"h-4 w-4 mr-2\" />\n            Exported!\n          </>\n        ) : (\n          <>\n            <DocumentArrowDownIcon className=\"h-4 w-4 mr-2\" />\n            {label}\n          </>\n        )}\n      </Button>\n\n      {/* Error Message Tooltip */}\n      {showError && errorMessage && (\n        <div className=\"absolute top-full right-0 mt-2 w-64 p-3 bg-red-50 border border-red-200 rounded-md shadow-lg z-50\">\n          <div className=\"flex items-start gap-2\">\n            <ExclamationTriangleIcon className=\"h-4 w-4 text-red-500 mt-0.5 flex-shrink-0\" />\n            <div>\n              <p className=\"text-sm font-medium text-red-800\">Export Error</p>\n              <p className=\"text-xs text-red-600 mt-1\">{errorMessage}</p>\n            </div>\n          </div>\n        </div>\n      )}\n    </div>\n  );\n}\n",
+        "label": "critical",
+        "path": "src/components/shared/ExportButton.tsx",
+        "reason": "Existing export component that handles file downloads; needs adaptation for CSV format",
+        "tier": 1
+      },
+      {
+        "content": "- (no top-level symbols indexed)",
+        "label": "relevant",
+        "path": "src/proxy.ts",
+        "reason": "Likely contains API proxy methods to fetch filtered dashboard records",
+        "tier": 2
+      },
+      {
+        "content": "May contain export-related constants or configuration",
+        "label": "peripheral",
+        "path": "src/lib/constants/index.ts",
+        "reason": "May contain export-related constants or configuration",
+        "tier": 3
+      },
+      {
+        "content": "retained as seed (rerank said irrelevant: Authentication guard; unrelated to CSV export functionality)",
+        "label": "peripheral",
+        "path": "src/components/auth/RouteGuard.tsx",
+        "reason": "retained as seed (rerank said irrelevant: Authentication guard; unrelated to CSV export functionality)",
+        "tier": 3
+      },
+      {
+        "content": "retained as seed (rerank said irrelevant: Defines skeleton loaders; not related to export features)",
+        "label": "peripheral",
+        "path": "src/components/DocumentLayoutSkeleton.tsx",
+        "reason": "retained as seed (rerank said irrelevant: Defines skeleton loaders; not related to export features)",
+        "tier": 3
+      },
+      {
+        "content": "retained as seed (rerank said irrelevant: PDF viewer component; not related to CSV export or dashboard filtering)",
+        "label": "peripheral",
+        "path": "src/features/documents/viewer/pdfjs-viewer/PDFJSViewer.tsx",
+        "reason": "retained as seed (rerank said irrelevant: PDF viewer component; not related to CSV export or dashboard filtering)",
+        "tier": 3
+      },
+      {
+        "content": "retained as seed (rerank said irrelevant: Form input components for guideline details; unrelated to CSV export)",
+        "label": "peripheral",
+        "path": "src/features/guidelines/guideline-details/components/sections/recommended-dosage/components/inputs.tsx",
+        "reason": "retained as seed (rerank said irrelevant: Form input components for guideline details; unrelated to CSV export)",
+        "tier": 3
+      },
+      {
+        "content": "retained as seed (rerank said irrelevant: Excel viewer component; not related to CSV export or dashboard)",
+        "label": "peripheral",
+        "path": "src/features/excel-viewer/ExcelViewerCore.tsx",
+        "reason": "retained as seed (rerank said irrelevant: Excel viewer component; not related to CSV export or dashboard)",
+        "tier": 3
+      },
+      {
+        "content": "Main header component; dashboard may be located here or nearby",
+        "label": "peripheral",
+        "path": "src/components/layout/AppHeader.tsx",
+        "reason": "Main header component; dashboard may be located here or nearby",
+        "tier": 3
+      },
+      {
+        "content": "retained as seed (rerank said irrelevant: Reports page for MANAGER role; distinct from dashboard CSV export)",
+        "label": "peripheral",
+        "path": "src/app/(protected)/privileged/(report)/rp/page.tsx",
+        "reason": "retained as seed (rerank said irrelevant: Reports page for MANAGER role; distinct from dashboard CSV export)",
+        "tier": 3
+      },
+      {
+        "content": "retained as seed (rerank said irrelevant: PDF viewer type definitions; unrelated to CSV export or records)",
+        "label": "peripheral",
+        "path": "src/features/documents/viewer/pdf-viewer/types/index.ts",
+        "reason": "retained as seed (rerank said irrelevant: PDF viewer type definitions; unrelated to CSV export or records)",
+        "tier": 3
+      },
+      {
+        "content": "retained as seed (rerank said irrelevant: Sources list component; not the dashboard or records to export)",
+        "label": "peripheral",
+        "path": "src/features/sources/components/ScheduledSourcesList.tsx",
+        "reason": "retained as seed (rerank said irrelevant: Sources list component; not the dashboard or records to export)",
+        "tier": 3
+      },
+      {
+        "content": "retained as seed (rerank said irrelevant: API endpoint for duplicate checking; unrelated to CSV export)",
+        "label": "peripheral",
+        "path": "src/app/api/(document)/doc/dup_check_id/route.ts",
+        "reason": "retained as seed (rerank said irrelevant: API endpoint for duplicate checking; unrelated to CSV export)",
+        "tier": 3
+      },
+      {
+        "content": "retained as seed (rerank said irrelevant: Related documents panel; not the main dashboard or records table)",
+        "label": "peripheral",
+        "path": "src/features/workflow/components/documents-table/RelatedDocsExpandedRow.tsx",
+        "reason": "retained as seed (rerank said irrelevant: Related documents panel; not the main dashboard or records table)",
+        "tier": 3
+      },
+      {
+        "content": "retained as seed (rerank said irrelevant: Custom attributes editor for guidelines; unrelated to dashboard CSV export)",
+        "label": "peripheral",
+        "path": "src/features/guidelines/guideline-details/components/sections/custom-attributes/CombinedPolicyAttributes.tsx",
+        "reason": "retained as seed (rerank said irrelevant: Custom attributes editor for guidelines; unrelated to dashboard CSV export)",
+        "tier": 3
+      }
+    ],
+    "recent_commits": [
+      {
+        "files": [
+          "src/components/shared/ExportButton.tsx"
+        ],
+        "message": "fixs",
+        "sha": "c071bf99deb1"
+      },
+      {
+        "files": [
+          "src/components/shared/ExportButton.tsx"
+        ],
+        "message": "Removed unwanted console logs",
+        "sha": "5c8fc1e04351"
+      },
+      {
+        "files": [
+          "src/components/shared/ExportButton.tsx"
+        ],
+        "message": "feat: Implement pagination and role filtering in user metrics page",
+        "sha": "dd72c529ddf1"
+      },
+      {
+        "files": [
+          "src/components/shared/ExportButton.tsx"
+        ],
+        "message": "Add ExportButton component and integrate it into reports and metrics pages",
+        "sha": "3688e0e13b0c"
+      }
+    ],
+    "repo_id": 1,
+    "request_type": "feature",
+    "seed_symbols": [],
+    "sha": "a7a668f8d9c0235bfe0e1b188c47a33b5d4d8082",
+    "stats": {
+      "candidate_files": 20,
+      "demotions": 0,
+      "dropped_by_rerank": 0,
+      "dropped_common_names": [],
+      "dropped_for_budget": 0,
+      "entities": {
+        "domains": [
+          "dashboard",
+          "export"
+        ],
+        "error_strings": [],
+        "files_mentioned": [],
+        "request_type": "feature",
+        "symbols": []
+      },
+      "expansion_candidates": 0,
+      "files_after_expansion": 15,
+      "neighbour_symbols": 0,
+      "reranked": 15,
+      "seed_files": 15,
+      "seed_symbols": 0,
+      "seeds_per_channel": {
+        "domain": 10,
+        "fts": 10,
+        "mention": 0,
+        "symbol": 0,
+        "trigram": 0
+      },
+      "stack_frames_in_index": 0,
+      "stack_frames_parsed": 0,
+      "test_files": 0,
+      "tiers": {
+        "1": 1,
+        "2": 1,
+        "3": 13
+      },
+      "token_count": 3340
+    },
+    "token_count": 3340
+  },
+  "indexed_sha": "a7a668f8d9c0235bfe0e1b188c47a33b5d4d8082",
+  "name": "assure42_feature_clear",
+  "repo_root_path": "/Users/anuprasjadhav/PycharmProjects/assure42",
+  "request": {
+    "attachments": [],
+    "text": "Add a CSV export button to the dashboard that lets a user download the currently filtered list of records as a CSV file.",
+    "type": "feature"
+  },
+  "run_id": "1c8288fc-57d4-4777-a6df-dca5c41a94a5",
+  "spec_plan": {
+    "open_questions": [
+      {
+        "default": "Create the table and its filter state fresh in src/features/workflow/components/documents-table/DocumentsTable.tsx, the only existing documents-table directory in the pack.",
+        "q": "Where does the real documents dashboard table actually live, and what shape is its filter state, given that neither src/features/documents/components/DocumentsTable.tsx nor any documents-list table file is visible in the pack?"
+      },
+      {
+        "default": "Implement exportDocumentsToCsv.ts as a self-contained next-safe-action action that accepts filter params and queries records directly, to be reconciled with the real data layer during implementation.",
+        "q": "What server action/data-access pattern should the export action reuse to fetch filtered document records, given no existing documents query logic is visible in the pack?"
+      }
+    ],
+    "plan": {
+      "edges": [
+        {
+          "from_task": "t1",
+          "kind": "code",
+          "to_task": "t2"
+        },
+        {
+          "from_task": "t1",
+          "kind": "code",
+          "to_task": "t3"
+        }
+      ],
+      "tasks": [
+        {
+          "criterion_refs": [
+            "AC1",
+            "AC3"
+          ],
+          "description": "Create src/features/workflow/components/documents-table/exportDocumentsToCsv.ts implementing a next-safe-action action that accepts filter parameters (status, source, search, date range, etc.), fetches matching document records, serializes them into CSV text (header row + one line per record, comma-escaped), base64-encodes the CSV string, and returns { data: { file: base64String, filename: 'documents-export-<timestamp>.csv' } } to match the ExportButton's expected response shape.",
+          "done_criteria": "Calling the action with a filter object returns a base64 payload and filename ending in .csv containing only rows matching those filters",
+          "est_size": "M",
+          "files": [
+            "src/features/workflow/components/documents-table/exportDocumentsToCsv.ts"
+          ],
+          "id": "t1",
+          "title": "Add server action to export filtered documents as CSV"
+        },
+        {
+          "criterion_refs": [
+            "AC1",
+            "AC2"
+          ],
+          "description": "Create src/features/workflow/components/documents-table/DocumentsTable.tsx that renders the documents list with filter state (status/source/search), and imports ExportButton from src/components/shared/ExportButton.tsx to render it near the table's toolbar, passing action={exportDocumentsToCsv}, params set from the table's live filter state, and label='Export to CSV'.",
+          "done_criteria": "The export button appears above/beside the documents table and its params prop reflects the table's live filter state on each render",
+          "est_size": "M",
+          "files": [
+            "src/features/workflow/components/documents-table/DocumentsTable.tsx"
+          ],
+          "id": "t2",
+          "title": "Create DocumentsTable with filters and CSV ExportButton wired in"
+        },
+        {
+          "criterion_refs": [
+            "AC1",
+            "AC2",
+            "AC3"
+          ],
+          "description": "Add src/features/workflow/components/documents-table/exportDocumentsToCsv.test.ts covering: (1) unit test that given filter params, the action produces correctly-escaped CSV rows and returns { data: { file, filename } } matching ExportButton's expected shape (base64 string, filename ending .csv); (2) integration test against seeded/mocked document records verifying the returned CSV body contains exactly the rows matching a given filter and a proper header row.",
+          "done_criteria": "New tests fail without t1's implementation and pass with it, covering CSV content correctness, filter pass-through, and the response shape ExportButton depends on",
+          "est_size": "S",
+          "files": [
+            "src/features/workflow/components/documents-table/exportDocumentsToCsv.test.ts"
+          ],
+          "id": "t3",
+          "title": "Unit and integration test the CSV export action and response shape"
+        }
+      ]
+    },
+    "spec": {
+      "assumptions": [
+        {
+          "confidence": "low",
+          "text": "No documents-list table component currently exists at any path visible in the pack (the previously-claimed src/features/documents/components/DocumentsTable.tsx does not exist), so a new DocumentsTable.tsx must be created inside the existing src/features/workflow/components/documents-table/ directory, which already holds a sibling documents-table file (RelatedDocsExpandedRow.tsx) and is therefore the correct home for this table and its filter state"
+        },
+        {
+          "confidence": "high",
+          "text": "The project uses next-safe-action server actions (as shown by useAction in ExportButton.tsx), so the new CSV export logic must be implemented as a next-safe-action action following the same pattern (returning { data: { file: base64string, filename: string } })"
+        },
+        {
+          "confidence": "low",
+          "text": "A new server action file exportDocumentsToCsv.ts is needed since no existing CSV export action for documents is visible in the pack; it will query documents via whatever data-access pattern the new DocumentsTable.tsx uses to populate its own rows"
+        },
+        {
+          "confidence": "high",
+          "text": "CSV generation will use a simple in-house serializer (join fields with commas, escape quotes) rather than adding a new dependency, since no CSV library is visible in the pack"
+        }
+      ],
+      "criteria": [
+        {
+          "given": "the documents table is rendered with one or more filters applied (e.g. status or source filter set in its filter state)",
+          "id": "AC1",
+          "then": "a new server action is invoked with the current filter parameters and returns a base64-encoded CSV file plus a filename ending in .csv",
+          "verify_by": "unit",
+          "when": "the user clicks the new CSV export button"
+        },
+        {
+          "given": "a server action response containing a base64 CSV payload and a filename like documents-export.csv",
+          "id": "AC2",
+          "then": "the action's returned data shape matches { data: { file: base64String, filename: string } } so ExportButton produces a text/csv Blob and triggers a download with that filename",
+          "verify_by": "unit",
+          "when": "the export action's result is processed by the reused ExportButton component"
+        },
+        {
+          "given": "the export server action is called with filter parameters matching a subset of seeded document records",
+          "id": "AC3",
+          "then": "the returned CSV content contains only rows matching those filters, with a header row and one line per matching record",
+          "verify_by": "integration",
+          "when": "the action executes against the data layer"
+        }
+      ],
+      "non_goals": [
+        "Will not modify src/components/shared/ExportButton.tsx because it already supports CSV via filename-extension MIME detection and base64 blob handling; it needs no code change, only a new action passed into it",
+        "Will not modify src/proxy.ts because the export action will call existing documents data-fetching logic directly rather than altering the shared proxy layer",
+        "Will not modify src/features/workflow/components/documents-table/RelatedDocsExpandedRow.tsx because it is an expanded-row detail panel, not the table or its filter state, and is unaffected by adding an export action"
+      ],
+      "problem_statement": "The documents dashboard table has no way to export its currently filtered rows as a CSV file. The reusable src/components/shared/ExportButton.tsx already supports CSV downloads via base64-encoded server action responses (it picks the .csv MIME type when filename ends in .csv), but no CSV-generating server action exists yet and no table component in the repo renders an ExportButton wired to filter state. Since the exact documents-table component path referenced in prior feedback does not exist in this repo, this plan places the new CSV export action and its wiring in src/features/workflow/components/documents-table/ (the only documents-table directory visible in the pack, containing RelatedDocsExpandedRow.tsx), alongside a new documents table component and its tests. Done means a visible export button on that table triggers a CSV download containing only the rows matching the table's active filters.",
+      "touchable_files": [
+        "src/features/workflow/components/documents-table/DocumentsTable.tsx",
+        "src/features/workflow/components/documents-table/exportDocumentsToCsv.ts",
+        "src/features/workflow/components/documents-table/exportDocumentsToCsv.test.ts"
+      ]
+    }
+  },
+  "validation": {
+    "checks": [
+      {
+        "details": [],
+        "name": "path_validity",
+        "passed": true
+      },
+      {
+        "details": [],
+        "name": "criteria_wellformed",
+        "passed": true
+      },
+      {
+        "details": [],
+        "name": "scope_consistency",
+        "passed": true
+      },
+      {
+        "details": [],
+        "name": "edge_augmentation",
+        "passed": true
+      },
+      {
+        "details": [],
+        "name": "dag_acyclic",
+        "passed": true
+      },
+      {
+        "details": [],
+        "name": "traceability",
+        "passed": true
+      },
+      {
+        "details": [],
+        "name": "test_coverage",
+        "passed": true
+      }
+    ],
+    "escalation": null,
+    "passed": true,
+    "repair_attempts": 1
+  }
+}

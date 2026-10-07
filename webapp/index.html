@@ -1,0 +1,810 @@
+<!--
+  Task 09 (+ increment 5) — Approval UI. Single static file, vanilla JS +
+  fetch, no build step. Served by FastAPI at GET / (see src/api.py:
+  serve_webapp). Talks only to the public /v1 API documented in src/api.py /
+  src/runs.py — no private endpoints, no server logic here beyond the static
+  file serve.
+
+  =====================================================================
+  MANUAL TEST SCRIPT (this is the task's actual "smoke test" — a human must
+  click through it; it is NOT covered by pytest). Two human-approval gates:
+  gate 1 approves the SCOPE (the spec — problem/criteria/files/non-goals,
+  no plan yet); gate 2 approves the PLAN (task DAG) generated from that
+  approved spec, plus a chat panel to ask prose questions about it. Run
+  against BOTH:
+    /Users/anuprasjadhav/PycharmProjects/assure42
+    /Users/anuprasjadhav/PycharmProjects/assure42-clinical-ops
+
+  Prereq: register + index each repo once — either via the "Register a repo"
+  form on #/new, or POST /v1/repos {"root_path": "<repo path>"} directly.
+  Either way, wait for status "ready" before it shows up in the run picker.
+
+  Checklist:
+   1. Open #/ — run list loads (may be empty first time).
+   2. Click "New run" -> #/new. Use the "Register a repo" form with an
+      absolute server-disk path; status line polls "building" -> "ready"
+      (or "failed"/invalid-path banner), then the repo appears in the
+      picker above and in the repo table below. Repo picker lists only
+      "ready" repos.
+   3. Pick a repo, type "feature", enter request text, submit.
+      -> redirected to #/runs/{id}; page polls and shows a progress state
+         while status is pending/context_building/spec_drafting.
+   4. When it reaches awaiting_spec_approval (GATE 1): verify screen order
+      top-to-bottom is: escalation banner (if tripped), Problem statement
+      (editable), Assumptions (low-confidence ones highlighted), Open
+      questions (defaults pre-filled, editable), Criteria (editable, up to
+      4), Touchable files (editable), Non-goals (editable), Validation
+      report. There is NO Task DAG here — no plan exists yet.
+   5. Edit exactly one criterion's "when" field. "Save edits" enables ->
+      click it. -> spec re-renders with a new version, no LLM call, run
+      stays in awaiting_spec_approval.
+   6. Edit a criterion's "when" to a single word (e.g. "click") and Save.
+      -> 422; the failing checks render inline via the same validation
+         report widget used elsewhere (renderValidation fed the response's
+         `checks` array). Fix it back before continuing.
+   7. Edit exactly one open question's answer. "Submit answers" enables ->
+      click it. -> run goes to spec_drafting, UI keeps polling, then
+      returns to awaiting_spec_approval as a new version incorporating the
+      answer.
+   8. Reject the spec with feedback. -> spec_drafting again, polling,
+      returns as a new version incorporating the feedback.
+   9. Click "Approve scope". -> run moves through planning to
+      awaiting_approval (GATE 2) with a real generated plan. Verify screen
+      order: Assumptions/Non-goals, Open questions (now READ-ONLY — they
+      were bound at gate 1), Criteria, Touchable files, Task DAG (ranked
+      columns, "depends on:" under each card), Validation report, Chat.
+  10. In the chat panel, ask 2 questions. -> each appears as a human bubble
+      followed by an assistant bubble (highlighted); a "use as reject
+      feedback" button sits under each assistant reply.
+  11. Click "use as reject feedback" on one assistant reply. -> the reject
+      textarea below is pre-filled with that reply's text and scrolled
+      into view.
+  12. Submit a plan-level reject with feedback. -> "planning" again,
+      polling, returns as a new plan version incorporating the feedback
+      (spec is untouched — still the same approved spec).
+  13. On the new version, leave everything untouched and click Approve.
+      -> run transitions to "approved". Plan renders read-only: no Approve/
+         Reject/chat-input controls (past chat history, if any, still
+         shown read-only).
+  14. Force a 409: open the same run (at either gate) in two tabs, act in
+      one, then submit a stale-version action in the other.
+      -> toast "plan changed, reloading" / "spec changed, reloading"
+         appears and the page refetches.
+  15. Look at a failed run (or induce one) — error + whichever validation
+      report exists (spec_validation or validation) render instead of the
+      approval sections.
+  =====================================================================
+-->
+<title>Plan Approval</title>
+<style>
+  :root { color-scheme: light; }
+  body { font: 14px/1.5 -apple-system, system-ui, sans-serif; margin: 0; background: #f7f7f8; color: #1b1b1f; }
+  header { background: #202124; color: #fff; padding: 12px 20px; display: flex; align-items: center; gap: 16px; }
+  header a { color: #fff; text-decoration: none; font-weight: 600; }
+  main { max-width: 960px; margin: 24px auto; padding: 0 16px 60px; }
+  h1 { font-size: 20px; margin: 0 0 12px; }
+  h2 { font-size: 16px; margin: 24px 0 8px; }
+  table { width: 100%; border-collapse: collapse; background: #fff; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #e3e3e6; font-size: 13px; }
+  tr.run-row { cursor: pointer; }
+  tr.run-row:hover { background: #f0f0f2; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; color: #fff; }
+  .badge.pending, .badge.context_building, .badge.spec_drafting, .badge.planning { background: #6b7280; }
+  .badge.awaiting_spec_approval, .badge.awaiting_approval { background: #b45309; }
+  .badge.approved { background: #15803d; }
+  .badge.failed { background: #b91c1c; }
+  .badge.cancelled { background: #4b5563; }
+  .card { background: #fff; border: 1px solid #e3e3e6; border-radius: 6px; padding: 12px 14px; margin-bottom: 10px; }
+  .card.critical { border-left: 4px solid #b45309; }
+  .btn { background: #2563eb; color: #fff; border: none; border-radius: 4px; padding: 8px 16px; font-size: 14px; cursor: pointer; }
+  .btn.secondary { background: #6b7280; }
+  .btn.danger { background: #b91c1c; }
+  .btn:disabled { opacity: 0.5; cursor: default; }
+  input[type=text], textarea, select { width: 100%; box-sizing: border-box; padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px; font: inherit; }
+  textarea { min-height: 70px; }
+  label { display: block; font-weight: 600; margin: 10px 0 4px; }
+  .field { margin-bottom: 12px; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .muted { color: #6b7280; }
+  .verify_by { font-size: 11px; padding: 1px 6px; border-radius: 8px; background: #e0e7ff; color: #3730a3; margin-left: 6px; }
+  .banner { padding: 10px 14px; border-radius: 6px; margin-bottom: 12px; }
+  .banner.yellow { background: #fef3c7; border: 1px solid #f59e0b; }
+  .banner.red { background: #fee2e2; border: 1px solid #dc2626; }
+  .banner.green { background: #dcfce7; border: 1px solid #16a34a; }
+  .toast { position: fixed; bottom: 20px; right: 20px; background: #1b1b1f; color: #fff; padding: 10px 16px; border-radius: 6px; }
+  .dag { display: flex; gap: 16px; overflow-x: auto; align-items: flex-start; }
+  .dag-col { flex: 0 0 220px; }
+  .check { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px dashed #e3e3e6; }
+  .check .pass { color: #15803d; } .check .fail { color: #b91c1c; }
+  .error-text { white-space: pre-wrap; font-family: ui-monospace, monospace; font-size: 12px; background: #fee2e2; padding: 8px; border-radius: 4px; }
+  ul { margin: 4px 0; padding-left: 20px; }
+</style>
+
+<header>
+  <a href="#/">Plan Approval</a>
+</header>
+<main id="app"></main>
+
+<script>
+'use strict';
+
+// ---------------------------------------------------------------- api client
+
+async function api(method, path, body) {
+  const opts = { method, headers: { 'Content-Type': 'application/json' } };
+  if (method === 'POST') opts.headers['Idempotency-Key'] = crypto.randomUUID();
+  if (body !== undefined) opts.body = JSON.stringify(body);
+  const res = await fetch(path, opts);
+  let data = null;
+  try { data = await res.json(); } catch (e) { /* empty body */ }
+  if (!res.ok) {
+    const err = new Error((data && data.detail) || res.statusText);
+    err.status = res.status;
+    err.body = data;
+    throw err;
+  }
+  return data;
+}
+
+// ------------------------------------------------------------------- toast
+
+function toast(msg) {
+  const el = document.createElement('div');
+  el.className = 'toast';
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 4000);
+}
+
+function escapeHtml(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+}
+
+// -------------------------------------------------------------- root render
+
+const app = document.getElementById('app');
+let pollTimer = null;
+
+function stopPolling() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+}
+
+function route() {
+  stopPolling();
+  const hash = location.hash || '#/';
+  const runMatch = hash.match(/^#\/runs\/([^/]+)$/);
+  if (hash === '#/new') {
+    renderNew();
+  } else if (runMatch) {
+    renderDetail(runMatch[1]);
+  } else {
+    renderList();
+  }
+}
+window.addEventListener('hashchange', route);
+window.addEventListener('DOMContentLoaded', route);
+
+// ---------------------------------------------------------------- run list
+
+async function renderList() {
+  app.innerHTML = '<h1>Runs</h1><p><button class="btn" onclick="location.hash=\'#/new\'">New run</button></p><div id="list-body">Loading&hellip;</div>';
+  try {
+    const runs = await api('GET', '/v1/runs');
+    const body = document.getElementById('list-body');
+    if (!runs.length) { body.innerHTML = '<p class="muted">No runs yet.</p>'; return; }
+    const rows = runs.map(r => `
+      <tr class="run-row" onclick="location.hash='#/runs/${r.run_id}'">
+        <td>${escapeHtml(r.run_id.slice(0, 8))}</td>
+        <td><span class="badge ${r.status}">${escapeHtml(r.status)}</span></td>
+        <td>${escapeHtml((r.request_text || '').slice(0, 80))}${(r.request_text || '').length > 80 ? '…' : ''}</td>
+        <td class="muted">${new Date(r.created_at).toLocaleString()}</td>
+      </tr>`).join('');
+    body.innerHTML = `<table><thead><tr><th>id</th><th>status</th><th>request</th><th>created</th></tr></thead><tbody>${rows}</tbody></table>`;
+  } catch (e) {
+    document.getElementById('list-body').innerHTML = `<div class="banner red">${escapeHtml(e.message)}</div>`;
+  }
+}
+
+// ---------------------------------------------------------------- new run
+
+async function renderNew() {
+  app.innerHTML = `
+    <h1>New run</h1>
+    <div id="new-error"></div>
+    <div class="field"><label>Repo</label><select id="f-repo"><option>Loading…</option></select></div>
+    <div class="field"><label>Type</label>
+      <div class="row">
+        <label class="row"><input type="radio" name="f-type" value="feature" checked style="width:auto"> feature</label>
+        <label class="row"><input type="radio" name="f-type" value="bug" style="width:auto"> bug</label>
+      </div>
+    </div>
+    <div class="field"><label>Request</label><textarea id="f-text" placeholder="Describe the feature or bug…"></textarea></div>
+    <div class="field"><label>Attachments (optional, one per line — e.g. a stack trace)</label><textarea id="f-attach"></textarea></div>
+    <button class="btn" id="f-submit" onclick="submitNewRun()">Create run</button>
+
+    <h2 style="margin-top:32px">Register a repo</h2>
+    <p class="muted">Path must exist on this server's disk. Indexing runs in the background — the repo appears above once it reaches "ready".</p>
+    <div id="reg-error"></div>
+    <div class="row">
+      <input type="text" id="reg-path" placeholder="/absolute/path/to/repo">
+      <button class="btn secondary" id="reg-submit" onclick="registerRepo()" style="flex:0 0 auto">Register</button>
+    </div>
+    <div id="reg-status" class="muted" style="margin-top:6px"></div>
+    <div id="repo-list" style="margin-top:10px"></div>
+  `;
+  await loadRepoPicker();
+}
+
+async function loadRepoPicker() {
+  try {
+    const repos = await api('GET', '/v1/repos');
+    const ready = repos.filter(r => r.status === 'ready');
+    const sel = document.getElementById('f-repo');
+    sel.innerHTML = ready.length
+      ? ready.map(r => `<option value="${r.repo_id}">${escapeHtml(r.root_path)}</option>`).join('')
+      : '<option value="">No ready repos — register one below</option>';
+    const listEl = document.getElementById('repo-list');
+    if (listEl) {
+      listEl.innerHTML = repos.length ? '<table><thead><tr><th>path</th><th>status</th><th>files</th></tr></thead><tbody>' +
+        repos.map(r => `<tr><td>${escapeHtml(r.root_path)}</td><td><span class="badge ${r.status === 'ready' ? 'approved' : r.status === 'failed' ? 'failed' : 'planning'}">${escapeHtml(r.status)}</span></td><td>${r.file_count ?? '—'}</td></tr>`).join('')
+        + '</tbody></table>' : '';
+    }
+    return repos;
+  } catch (e) {
+    document.getElementById('new-error').innerHTML = `<div class="banner red">${escapeHtml(e.message)}</div>`;
+    return [];
+  }
+}
+
+async function registerRepo() {
+  const path = document.getElementById('reg-path').value.trim();
+  const errBox = document.getElementById('reg-error');
+  const statusEl = document.getElementById('reg-status');
+  const btn = document.getElementById('reg-submit');
+  errBox.innerHTML = '';
+  if (!path) { errBox.innerHTML = '<div class="banner red">Path is required.</div>'; return; }
+  btn.disabled = true;
+  statusEl.textContent = 'Registering…';
+  try {
+    const result = await api('POST', '/v1/repos', { root_path: path });
+    if (result.warning) toast(result.warning);
+    pollRepoStatus(result.repo_id, path, btn, statusEl, errBox);
+  } catch (e) {
+    errBox.innerHTML = `<div class="banner red">${escapeHtml(e.message)}</div>`;
+    btn.disabled = false;
+    statusEl.textContent = '';
+  }
+}
+
+// Polls GET /v1/repos every 2s until this repo leaves "building", then
+// refreshes the picker. Self-contained timer — no interaction with the
+// run-detail poll (they're never on screen at the same time).
+function pollRepoStatus(repoId, path, btn, statusEl, errBox) {
+  statusEl.textContent = `Indexing ${path}…`;
+  const timer = setInterval(async () => {
+    const repos = await loadRepoPicker();
+    const r = repos.find(x => x.repo_id === repoId);
+    if (!r || r.status === 'building') return;
+    clearInterval(timer);
+    btn.disabled = false;
+    if (r.status === 'ready') {
+      statusEl.textContent = `${path} — ready (${r.file_count} files, ${r.symbol_count} symbols).`;
+      document.getElementById('reg-path').value = '';
+    } else {
+      statusEl.textContent = '';
+      errBox.innerHTML = `<div class="banner red">Indexing ${escapeHtml(path)} ended in status "${escapeHtml(r.status)}".</div>`;
+    }
+  }, 2000);
+}
+
+async function submitNewRun() {
+  const repoId = Number(document.getElementById('f-repo').value);
+  const type = document.querySelector('input[name=f-type]:checked').value;
+  const text = document.getElementById('f-text').value.trim();
+  const attachments = document.getElementById('f-attach').value.split('\n').map(s => s.trim()).filter(Boolean);
+  const btn = document.getElementById('f-submit');
+  if (!repoId || !text) {
+    document.getElementById('new-error').innerHTML = '<div class="banner red">Repo and request text are required.</div>';
+    return;
+  }
+  btn.disabled = true;
+  try {
+    const result = await api('POST', '/v1/runs', { repo_id: repoId, request: { type, text, attachments } });
+    location.hash = `#/runs/${result.run_id}`;
+  } catch (e) {
+    document.getElementById('new-error').innerHTML = `<div class="banner red">${escapeHtml(e.message)}</div>`;
+    btn.disabled = false;
+  }
+}
+
+// -------------------------------------------------------------- run detail
+
+const IN_PROGRESS = new Set(['pending', 'context_building', 'spec_drafting', 'planning']);
+let lastSeenVersion = null;   // tracks version before submitting an action, to highlight the new one
+let touchedQuestions = new Set();
+let specCriteriaState = [];   // gate 1's live edit buffer for criteria (add/remove changes its shape)
+let specAssumptionsState = []; // gate 1's read-only assumptions, round-tripped verbatim on Save edits
+let specTouchableState = [];  // engineering scope, hidden from gate 1's UI but round-tripped verbatim
+let specNonGoalsState = [];   // (see docs/planning-pipeline-design.md: PM sees functional fields only)
+let specDirty = false;
+let chatMessages = [];        // gate 2's live chat log, indexed for "use as reject feedback"
+
+function computeRanks(tasks, edges) {
+  const incoming = new Map(tasks.map(t => [t.id, edges.filter(e => e.to_task === t.id).map(e => e.from_task)]));
+  const rank = new Map();
+  function rankOf(id, seen) {
+    if (rank.has(id)) return rank.get(id);
+    if (seen.has(id)) return 0; // cycle guard — validators keep this a DAG
+    seen.add(id);
+    const preds = (incoming.get(id) || []).filter(p => incoming.has(p));
+    const r = preds.length === 0 ? 0 : Math.max(...preds.map(p => rankOf(p, seen) + 1));
+    rank.set(id, r);
+    return r;
+  }
+  tasks.forEach(t => rankOf(t.id, new Set()));
+  return rank;
+}
+
+async function renderDetail(runId) {
+  app.innerHTML = '<p>Loading&hellip;</p>';
+  touchedQuestions = new Set();
+  specDirty = false;
+  await refreshDetail(runId);
+}
+
+// Fetches the snapshot, renders it, and (re)arms a single 2s poll timer iff
+// still in-progress. Self-managing: safe to call from the initial mount, the
+// timer tick, or right after any submit action — never stacks multiple timers.
+async function refreshDetail(runId) {
+  stopPolling();
+  let snap;
+  try {
+    snap = await api('GET', `/v1/runs/${runId}`);
+  } catch (e) {
+    app.innerHTML = `<p><a href="#/">&larr; back</a></p><div class="banner red">${escapeHtml(e.message)}</div>`;
+    return;
+  }
+  renderDetailBody(snap);
+  if (IN_PROGRESS.has(snap.status)) {
+    pollTimer = setInterval(() => refreshDetail(runId), 2000);
+  }
+}
+
+function renderDetailBody(snap) {
+  const specPlan = snap.spec_plan;
+  let html = `<p><a href="#/">&larr; back to runs</a></p>`;
+  html += `<h1>Run ${escapeHtml(snap.run_id.slice(0, 8))} <span class="badge ${snap.status}">${escapeHtml(snap.status)}</span></h1>`;
+  html += `<p class="muted">${escapeHtml(snap.request.type)}: ${escapeHtml(snap.request.text)}</p>`;
+
+  if (IN_PROGRESS.has(snap.status)) {
+    html += `<div class="banner yellow">Working&hellip; current stage: <b>${escapeHtml(snap.status)}</b>. Refreshing every 2s.</div>`;
+  }
+
+  if (snap.status === 'failed') {
+    html += `<div class="banner red"><b>Failed:</b> ${escapeHtml(snap.error || 'unknown error')}</div>`;
+    if (snap.validation) html += renderValidation(snap.validation);
+    else if (snap.spec_validation) html += renderValidation(snap.spec_validation);
+  }
+
+  // --------------------------------------------------------------- gate 1
+  if (snap.status === 'awaiting_spec_approval' && snap.spec) {
+    if (lastSeenVersion !== null && snap.spec.version > lastSeenVersion) {
+      html += `<div class="banner green">Updated to v${snap.spec.version}</div>`;
+    }
+    html += renderSpec(snap.spec, snap.spec_validation, true);
+    html += `
+      <h2>Decision</h2>
+      <div class="row">
+        <button class="btn secondary" id="btn-save-edits" disabled onclick="saveSpecEdits('${snap.run_id}', ${snap.spec.version})">Save edits</button>
+        <button class="btn secondary" id="btn-submit-answers" ${touchedQuestions.size > 0 ? '' : 'disabled'} onclick="submitSpecAnswers('${snap.run_id}', ${snap.spec.version})">Submit answers</button>
+        <button class="btn" onclick="approveScope('${snap.run_id}', ${snap.spec.version})">Approve scope</button>
+      </div>
+      <div class="field" style="margin-top:14px">
+        <label>Reject with feedback</label>
+        <textarea id="reject-feedback" placeholder="What's wrong with this scope?"></textarea>
+        <button class="btn danger" style="margin-top:6px" onclick="rejectSpec('${snap.run_id}', ${snap.spec.version})">Reject</button>
+      </div>`;
+  }
+
+  // --------------------------------------------------------------- gate 2
+  if (specPlan && (snap.status === 'awaiting_approval' || snap.status === 'approved')) {
+    if (lastSeenVersion !== null && specPlan.version > lastSeenVersion) {
+      html += `<div class="banner green">Updated to v${specPlan.version}</div>`;
+    }
+    const editable = snap.status === 'awaiting_approval';
+    html += renderSpecPlan(specPlan, snap.validation, editable);
+    html += renderChat(snap);
+    if (editable) {
+      html += `
+        <h2>Decision</h2>
+        <div class="row">
+          <button class="btn" onclick="approveRun('${snap.run_id}', ${specPlan.version})">Approve</button>
+        </div>
+        <div class="field" style="margin-top:14px">
+          <label>Reject with feedback</label>
+          <textarea id="reject-feedback" placeholder="What's wrong with this plan?"></textarea>
+          <button class="btn danger" style="margin-top:6px" onclick="rejectRun('${snap.run_id}', ${specPlan.version})">Reject</button>
+        </div>`;
+    }
+  }
+
+  html += `<div id="detail-error"></div>`;
+  app.innerHTML = html;
+}
+
+// ------------------------------------------------------------------ gate 1
+
+function renderSpec(specSnap, specValidation, editable) {
+  const s = specSnap.spec;
+  specCriteriaState = s.criteria.map(c => ({ given: c.given, when: c.when, then: c.then, verify_by: c.verify_by }));
+  specAssumptionsState = s.assumptions;
+  // Engineering scope isn't shown on this screen (see spec_only.md) but must
+  // still round-trip verbatim through Save, same as specAssumptionsState.
+  specTouchableState = s.touchable_files;
+  specNonGoalsState = s.non_goals;
+  let h = '';
+
+  if (specValidation && specValidation.escalation) {
+    h += `<div class="banner yellow"><b>Escalation:</b> ${escapeHtml(specValidation.escalation)}</div>`;
+  }
+
+  h += '<h2>What\'s changing</h2>';
+  h += `<div class="field"><textarea id="s-problem" ${editable ? 'oninput="markSpecDirty()"' : 'disabled'}>${escapeHtml(s.problem_statement)}</textarea></div>`;
+
+  h += '<h2>Decisions we made for you</h2><ul>' + s.assumptions.map(a =>
+    `<li class="${a.confidence === 'low' ? 'card critical' : ''}">${escapeHtml(a.text)} <span class="muted">(${a.confidence} confidence)</span></li>`
+  ).join('') + '</ul>';
+
+  h += '<h2>Open questions</h2>';
+  if (!specSnap.open_questions.length) {
+    h += '<p class="muted">none</p>';
+  } else {
+    h += specSnap.open_questions.map((q, i) => `
+      <div class="field">
+        <label>${escapeHtml(q.q)}</label>
+        <input type="text" id="q-answer-${i}" value="${escapeHtml(q.default)}" ${editable ? `oninput="touchedQuestions.add(${i}); markQuestionTouched()"` : 'disabled'}>
+      </div>`).join('');
+  }
+
+  h += '<h2>Acceptance criteria</h2>';
+  h += `<div id="criteria-section">${renderCriteriaSection(editable)}</div>`;
+
+  // Touchable files / non-goals are engineering scope, not shown here — they
+  // still round-trip via specTouchableState/specNonGoalsState (see above) and
+  // surface at gate 2 (renderSpecPlan), which is the engineer's screen.
+
+  if (specValidation) h += renderValidation(specValidation);
+
+  return h;
+}
+
+// Rendered into #criteria-section; re-rendered in place by addCriterion /
+// removeCriterion (they mutate specCriteriaState, then call this again) so
+// the rest of the gate 1 screen never has to re-render on an add/remove.
+function renderCriteriaSection(editable) {
+  const cards = specCriteriaState.map((c, i) => `
+    <div class="card">
+      <b>AC${i + 1}</b>
+      <div class="field"><label>Given</label><input type="text" value="${escapeHtml(c.given)}" ${editable ? `oninput="specCriteriaState[${i}].given=this.value; markSpecDirty()"` : 'disabled'}></div>
+      <div class="field"><label>When</label><input type="text" value="${escapeHtml(c.when)}" ${editable ? `oninput="specCriteriaState[${i}].when=this.value; markSpecDirty()"` : 'disabled'}></div>
+      <div class="field"><label>Then</label><input type="text" value="${escapeHtml(c.then)}" ${editable ? `oninput="specCriteriaState[${i}].then=this.value; markSpecDirty()"` : 'disabled'}></div>
+      ${editable ? `<button class="btn secondary" onclick="removeCriterion(${i})">Remove</button>` : ''}
+    </div>`).join('');
+  const addBtn = editable
+    ? `<button class="btn secondary" id="btn-add-criterion" ${specCriteriaState.length >= 8 ? 'disabled' : ''} onclick="addCriterion()">Add criterion</button>`
+    : '';
+  return cards + addBtn;
+}
+
+function addCriterion() {
+  // ponytail: PM-authored criteria are written from the user's seat, so they
+  // default to integration (crosses a real boundary) rather than unit — the
+  // Verify by field itself is hidden here now (engineering concern), gate 2
+  // still shows/edits the true value.
+  specCriteriaState.push({ given: '', when: '', then: '', verify_by: 'integration' });
+  markSpecDirty();
+  document.getElementById('criteria-section').innerHTML = renderCriteriaSection(true);
+}
+
+function removeCriterion(i) {
+  specCriteriaState.splice(i, 1);
+  markSpecDirty();
+  document.getElementById('criteria-section').innerHTML = renderCriteriaSection(true);
+}
+
+function markSpecDirty() {
+  specDirty = true;
+  const btn = document.getElementById('btn-save-edits');
+  if (btn) btn.disabled = false;
+}
+
+function markQuestionTouched() {
+  const btn = document.getElementById('btn-submit-answers');
+  if (btn) btn.disabled = false;
+}
+
+async function saveSpecEdits(runId, version) {
+  const errBox = document.getElementById('detail-error');
+  const spec = {
+    problem_statement: document.getElementById('s-problem').value,
+    criteria: specCriteriaState.map((c, i) => ({
+      id: `AC${i + 1}`, given: c.given, when: c.when, then: c.then, verify_by: c.verify_by,
+    })),
+    touchable_files: specTouchableState,
+    non_goals: specNonGoalsState,
+    assumptions: specAssumptionsState,
+  };
+  lastSeenVersion = version;
+  try {
+    await api('POST', `/v1/runs/${runId}/spec`, { version, spec });
+    specDirty = false;
+    await refreshDetail(runId);
+  } catch (e) {
+    if (e.status === 409) {
+      toast('spec changed, reloading');
+      await refreshDetail(runId);
+    } else if (e.status === 422 && e.body && e.body.checks) {
+      if (errBox) errBox.innerHTML = renderValidation({ passed: false, checks: e.body.checks });
+    } else if (errBox) {
+      errBox.innerHTML = `<div class="banner red">${escapeHtml(e.message)}</div>`;
+    }
+  }
+}
+
+async function submitSpecAnswers(runId, version) {
+  const errBox = document.getElementById('detail-error');
+  if (touchedQuestions.size === 0) return;
+  const inputs = document.querySelectorAll('[id^="q-answer-"]');
+  const answers = Array.from(inputs).map((el, i) => ({ q_index: i, answer: el.value }));
+  lastSeenVersion = version;
+  try {
+    await api('POST', `/v1/runs/${runId}/spec/approve`, { version, answers });
+    await refreshDetail(runId);
+  } catch (e) {
+    if (e.status === 409) {
+      toast('spec changed, reloading');
+      await refreshDetail(runId);
+    } else if (errBox) {
+      errBox.innerHTML = `<div class="banner red">${escapeHtml(e.message)}</div>`;
+    }
+  }
+}
+
+async function approveScope(runId, version) {
+  const errBox = document.getElementById('detail-error');
+  lastSeenVersion = version;
+  try {
+    await api('POST', `/v1/runs/${runId}/spec/approve`, { version });
+    await refreshDetail(runId);
+  } catch (e) {
+    if (e.status === 409) {
+      toast('spec changed, reloading');
+      await refreshDetail(runId);
+    } else if (errBox) {
+      errBox.innerHTML = `<div class="banner red">${escapeHtml(e.message)}</div>`;
+    }
+  }
+}
+
+async function rejectSpec(runId, version) {
+  const feedback = document.getElementById('reject-feedback').value.trim();
+  const errBox = document.getElementById('detail-error');
+  if (!feedback) {
+    if (errBox) errBox.innerHTML = '<div class="banner red">Feedback is required to reject.</div>';
+    return;
+  }
+  lastSeenVersion = version;
+  try {
+    await api('POST', `/v1/runs/${runId}/spec/reject`, { version, feedback });
+    await refreshDetail(runId);
+  } catch (e) {
+    if (e.status === 409) {
+      toast('spec changed, reloading');
+      await refreshDetail(runId);
+    } else if (errBox) {
+      errBox.innerHTML = `<div class="banner red">${escapeHtml(e.message)}</div>`;
+    }
+  }
+}
+
+// ------------------------------------------------------------------ gate 2
+
+function renderSpecPlan(specPlan, validation, editable) {
+  const s = specPlan.spec;
+  let h = '';
+
+  h += '<h2>Assumptions</h2><ul>' + s.assumptions.map(a =>
+    `<li>${escapeHtml(a.text)} <span class="muted">(${a.confidence} confidence)</span></li>`).join('') + '</ul>';
+  h += '<h2>Non-goals</h2><ul>' + (s.non_goals.length ? s.non_goals.map(n => `<li>${escapeHtml(n)}</li>`).join('') : '<li class="muted">none</li>') + '</ul>';
+
+  h += '<h2>Open questions</h2>';
+  if (!specPlan.open_questions.length) {
+    h += '<p class="muted">none</p>';
+  } else {
+    // Always read-only here: open questions are answered and bound at gate 1
+    // (see renderSpec), before the plan even exists. `editable` (gate 2's
+    // approve/reject availability) intentionally does not reach this input.
+    h += specPlan.open_questions.map((q, i) => `
+      <div class="field">
+        <label>${escapeHtml(q.q)}</label>
+        <input type="text" id="q-answer-${i}" value="${escapeHtml(q.default)}" disabled>
+      </div>`).join('');
+  }
+
+  h += '<h2>Criteria</h2>';
+  h += s.criteria.map(c => `
+    <div class="card">
+      <b>${escapeHtml(c.id)}</b> <span class="verify_by">${escapeHtml(c.verify_by)}</span>
+      <div><b>Given</b> ${escapeHtml(c.given)}</div>
+      <div><b>When</b> ${escapeHtml(c.when)}</div>
+      <div><b>Then</b> ${escapeHtml(c.then)}</div>
+    </div>`).join('');
+
+  h += '<h2>Touchable files</h2><ul>' + s.touchable_files.map(f => `<li>${escapeHtml(f)}</li>`).join('') + '</ul>';
+
+  h += '<h2>Task DAG</h2>' + renderDag(specPlan.plan.tasks, specPlan.plan.edges);
+
+  if (validation) h += renderValidation(validation);
+
+  return h;
+}
+
+function renderDag(tasks, edges) {
+  const byId = new Map(tasks.map(t => [t.id, t]));
+  const ranks = computeRanks(tasks, edges);
+  const maxRank = Math.max(0, ...tasks.map(t => ranks.get(t.id) || 0));
+  const cols = [];
+  for (let r = 0; r <= maxRank; r++) {
+    cols.push(tasks.filter(t => ranks.get(t.id) === r));
+  }
+  const dependsOn = t => edges.filter(e => e.to_task === t.id).map(e => e.from_task);
+  const colsHtml = cols.map(colTasks => `
+    <div class="dag-col">${colTasks.map(t => `
+      <div class="card">
+        <b>${escapeHtml(t.id)}</b> ${escapeHtml(t.title)}
+        <span class="verify_by">${escapeHtml(t.est_size)}</span>
+        <div class="muted">${escapeHtml(t.description)}</div>
+        <div><b>files:</b> ${t.files.map(escapeHtml).join(', ') || '—'}</div>
+        <div><b>done:</b> ${escapeHtml(t.done_criteria)}</div>
+        <div><b>criteria:</b> ${t.criterion_refs.map(escapeHtml).join(', ') || '—'}</div>
+        <div class="muted">depends on: ${dependsOn(t).map(escapeHtml).join(', ') || 'none'}</div>
+      </div>`).join('')}</div>`).join('');
+  return `<div class="dag">${colsHtml}</div>`;
+}
+
+function renderValidation(validation) {
+  let h = '<h2>Validation report</h2>';
+  if (validation.escalation) {
+    h += `<div class="banner yellow"><b>Escalation:</b> ${escapeHtml(validation.escalation)}</div>`;
+  }
+  h += `<div class="banner ${validation.passed ? 'green' : 'red'}">${validation.passed ? 'All checks passed' : 'Some checks failed'}</div>`;
+  h += (validation.checks || []).map(c => `
+    <div class="check">
+      <span>${escapeHtml(c.name)}</span>
+      <span class="${c.passed ? 'pass' : 'fail'}">${c.passed ? 'pass' : 'fail'}</span>
+    </div>
+    ${c.details && c.details.length ? `<ul class="muted">${c.details.map(d => `<li>${escapeHtml(d)}</li>`).join('')}</ul>` : ''}
+  `).join('');
+  return h;
+}
+
+// Chat panel: placed after the Task DAG + Validation report (renderSpecPlan
+// already renders both) because it reads as "here's the plan and its
+// validation — now discuss it." snap.chat is already scoped server-side to
+// the current spec_plan version (src/runs.py's build_snapshot).
+function renderChat(snap) {
+  chatMessages = snap.chat || [];
+  let h = '<h2>Chat</h2>';
+  if (!chatMessages.length) {
+    h += '<p class="muted">No questions asked yet.</p>';
+  } else {
+    h += chatMessages.map((m, i) => {
+      const isAssistant = m.role === 'assistant';
+      return `<div class="card${isAssistant ? ' critical' : ''}">
+        <b>${escapeHtml(m.role)}</b>
+        <div>${escapeHtml(m.content)}</div>
+        ${isAssistant ? `<button class="btn secondary" onclick="useAsRejectFeedback(${i})">use as reject feedback</button>` : ''}
+      </div>`;
+    }).join('');
+  }
+  // Turns, not messages: a turn is one human+assistant pair. The real cap
+  // (MAX_CHAT_TURNS) is server-enforced and env-tunable — don't hardcode it,
+  // just show how many turns this conversation has used so far.
+  h += `<p class="muted">${Math.floor(chatMessages.length / 2)} turn(s) used.</p>`;
+
+  if (snap.status === 'awaiting_approval') {
+    h += `
+      <div id="chat-error"></div>
+      <div class="field">
+        <textarea id="chat-input" placeholder="Ask a question about this plan…"></textarea>
+        <button class="btn secondary" id="chat-ask-btn" onclick="sendChat('${snap.run_id}', ${snap.spec_plan.version})">Ask</button>
+      </div>`;
+  }
+  return h;
+}
+
+async function sendChat(runId, version) {
+  const input = document.getElementById('chat-input');
+  const btn = document.getElementById('chat-ask-btn');
+  const errBox = document.getElementById('chat-error');
+  const message = input.value.trim();
+  if (!message) return;
+  btn.disabled = true;
+  btn.textContent = 'Thinking…';
+  try {
+    await api('POST', `/v1/runs/${runId}/chat`, { version, message });
+    await refreshDetail(runId);   // synchronous call; refetch just re-pulls the updated chat array
+  } catch (e) {
+    if (e.status === 409 && e.body && e.body.title === 'Chat Limit Reached') {
+      if (errBox) errBox.innerHTML = `<div class="banner yellow">${escapeHtml(e.message)}</div>`;
+      input.disabled = true;
+      btn.disabled = true;
+      btn.textContent = 'Ask';
+    } else if (e.status === 409) {
+      toast('plan changed, reloading');
+      await refreshDetail(runId);
+    } else {
+      if (errBox) errBox.innerHTML = `<div class="banner red">${escapeHtml(e.message)}</div>`;
+      btn.disabled = false;
+      btn.textContent = 'Ask';
+    }
+  }
+}
+
+function useAsRejectFeedback(i) {
+  let box = document.getElementById('reject-feedback');
+  if (!box) {
+    // Approved runs (or gate 1's screen) may not render a reject textarea at
+    // all — create one above the error box so the link still works.
+    box = document.createElement('textarea');
+    box.id = 'reject-feedback';
+    box.placeholder = "What's wrong with this plan?";
+    const errBox = document.getElementById('detail-error');
+    errBox.parentNode.insertBefore(box, errBox);
+  }
+  box.value = chatMessages[i].content;
+  box.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  box.focus();
+}
+
+// ------------------------------------------------------------ approve/reject
+
+async function approveRun(runId, version) {
+  const errBox = document.getElementById('detail-error');
+  lastSeenVersion = version;
+  try {
+    await api('POST', `/v1/runs/${runId}/approve`, { version });
+    await refreshDetail(runId);
+  } catch (e) {
+    if (e.status === 409) {
+      toast('plan changed, reloading');
+      await refreshDetail(runId);
+    } else if (errBox) {
+      errBox.innerHTML = `<div class="banner red">${escapeHtml(e.message)}</div>`;
+    }
+  }
+}
+
+async function rejectRun(runId, version) {
+  const feedback = document.getElementById('reject-feedback').value.trim();
+  const errBox = document.getElementById('detail-error');
+  if (!feedback) {
+    if (errBox) errBox.innerHTML = '<div class="banner red">Feedback is required to reject.</div>';
+    return;
+  }
+  lastSeenVersion = version;
+  try {
+    await api('POST', `/v1/runs/${runId}/reject`, { version, feedback });
+    await refreshDetail(runId);
+  } catch (e) {
+    if (e.status === 409) {
+      toast('plan changed, reloading');
+      await refreshDetail(runId);
+    } else if (errBox) {
+      errBox.innerHTML = `<div class="banner red">${escapeHtml(e.message)}</div>`;
+    }
+  }
+}
+</script>
