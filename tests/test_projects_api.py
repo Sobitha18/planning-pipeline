@@ -83,7 +83,7 @@ def test_select_repos_returns_the_routers_selection(client, monkeypatch):
     monkeypatch.setattr(repo_router, "select_repos", fake_select)
     resp = client.post(f"/v1/projects/{pid}/select-repos", json={"text": "add coupons", "attachments": ["trace"]})
     assert resp.status_code == 200
-    assert resp.json() == {"project_id": pid, "repos": [], "stats": {"turns": 1}}
+    assert resp.json() == {"project_id": pid, "repos": [], "ruled_out": [], "stats": {"turns": 1}}
     assert seen == {"project_id": pid, "text": "add coupons", "attachments": ["trace"]}
 
 

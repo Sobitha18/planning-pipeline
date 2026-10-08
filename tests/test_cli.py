@@ -85,12 +85,20 @@ def test_flags_run_a_single_request_non_interactively(fake_router):
     assert [t for _, t in fake_router] == ["add coupons"]
 
 
-def test_existing_project_is_reused_and_can_gain_repos(fake_router):
+def test_existing_project_goes_straight_to_the_request_without_asking_about_repos(fake_router):
     n = name()
     cli.run([n, "-r", str(MULTI / "orders-api"), "-q", "x"], Session().ask, lambda _: None)
-    s = Session(str(MULTI / "analytics-jobs"), "", "")      # add one repo, then quit at the request prompt
+    s = Session("add coupons", "")              # only the request prompt may ask anything
     assert cli.run([n], s.ask, s.out) == 0
-    assert f"Project {n!r} already exists with 1 repo(s)." in s.text
+    assert f"Project {n!r} already exists with 1 repo(s): orders-api" in s.text
+    assert not any("Repos:" in p or p == "> " for p in s.prompts)
+    assert fake_router[-1][1] == "add coupons"
+
+
+def test_existing_project_can_gain_repos_with_the_flag(fake_router):
+    n = name()
+    cli.run([n, "-r", str(MULTI / "orders-api"), "-q", "x"], Session().ask, lambda _: None)
+    assert cli.run([n, "-r", str(MULTI / "analytics-jobs"), "-q", "x"], Session().ask, lambda _: None) == 0
     from src.db import get_session
     from src import projects
     session = get_session()
@@ -191,3 +199,71 @@ def test_a_real_environment_variable_beats_dotenv(tmp_path, monkeypatch):
     monkeypatch.setenv("ROUTER_TIER", "cheap")
     load_dotenv(tmp_path / ".env")        # same call the CLI makes: override=False
     assert get_settings().router_tier == "cheap"
+
+
+# --- a request pasted at the repo prompt -----------------------------------
+
+SENTENCE = "Implement workflow header dropdown functionality to enable customizable configuration."
+
+
+def test_request_pasted_at_the_repo_prompt_is_offered_as_the_request(fake_router):
+    s = Session(name(), SENTENCE, "y", "")        # name, request-by-mistake, yes, quit
+    # no repos were given, so the project can't be created, but the sentence was NOT treated as a repo
+    assert cli.run([], s.ask, s.out) == 2
+    assert "That looks like a feature request, not a repo URL or path." in s.text
+    assert "neither an absolute path nor a git URL" not in s.text
+
+
+def test_sentence_at_the_repo_prompt_is_routed_after_the_repos_are_set_up(fake_router):
+    s = Session(name(), str(MULTI / "orders-api"), SENTENCE, "", "")
+    s.answers.insert(3, "y")                      # Use it as your feature request? -> y
+    assert cli.run([], s.ask, s.out) == 0
+    assert [t for _, t in fake_router] == [SENTENCE]
+
+
+def test_declining_keeps_reading_repos(fake_router):
+    s = Session(name(), SENTENCE, "n", str(MULTI / "orders-api"), "", "")
+    assert cli.run([], s.ask, s.out) == 0
+    assert fake_router == []                      # nothing routed; repo was still added
+
+
+def test_a_mistyped_repo_is_reported_immediately_and_the_prompt_continues(fake_router):
+    s = Session(name(), "orderz-api", str(MULTI / "orders-api"), "", "")
+    assert cli.run([], s.ask, s.out) == 0
+    assert "not added:" in s.text and "orderz-api" in s.text
+    assert "Created project" in s.text
+
+
+def test_multiline_paste_at_the_repo_prompt_becomes_one_request():
+    lines = ["Reviewers see a badge but can't tell why.", "Requirements", "1. New factor"]
+    asked = iter([lines[0], "y"])
+    out = []
+    repos, request = cli._read_repos(lambda p: next(asked), out.append, pasted=lambda: lines[1:])
+    assert repos == [] and request == "\n".join(lines)
+
+
+def test_trace_flag_is_passed_through_to_the_router(monkeypatch):
+    seen = {}
+
+    def fake(project_id, text, **kw):
+        seen.update(kw)
+        return RepoSelection(project_id=project_id, repos=[], stats={})
+
+    monkeypatch.setattr(repo_router, "select_repos", fake)
+    out = Session()
+    cli.run([name(), "-r", str(MULTI / "orders-api"), "-q", "x", "--trace"], out.ask, out.out)
+    assert seen["trace"] is not None
+    seen.clear()
+    cli.run([name(), "-r", str(MULTI / "orders-api"), "-q", "x"], out.ask, out.out)
+    assert seen["trace"] is None
+
+
+def test_left_out_repos_are_shown_with_their_reasons():
+    from src.models import RuledOutRepo
+    sel = RepoSelection(project_id=1, stats={"turns": 2, "tool_calls": 1}, repos=[
+        ResolvedRepo(repo="orders-api", role="primary", reason="owns it", repo_id=1,
+                     evidence=[{"path": "src/orders/routes.py", "note": "POST /api/orders"}])],
+        ruled_out=[RuledOutRepo(repo="harbor-billing", repo_id=2, reason="reads orders.total only; searched 'orders'")])
+    text = cli.format_selection(sel)
+    assert "LEFT OUT  harbor-billing: reads orders.total only; searched 'orders'" in text
+    assert text.index("PRIMARY") < text.index("LEFT OUT")

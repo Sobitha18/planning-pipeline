@@ -27,6 +27,7 @@ from src.runs import DomainError
 
 PROMPT_REPOS = ("Repos: paste git URLs (https://..., git@host:owner/repo) or absolute paths,\n"
                 "one per line. Empty line when done.")
+EXISTING_HINT = "  (add repos to it any time with: python -m src.cli {name} -r <git URL or path>)"
 
 
 def _index_now(repo_id: int, out: Callable[[str], None]) -> None:
@@ -57,6 +58,10 @@ def format_selection(selection) -> str:
             lines.append(f"  why:      {r.reason}")
             for ev in r.evidence:
                 lines.append(f"  evidence: {ev.path} - {ev.note}")
+    if selection.ruled_out:
+        lines.append("")
+        for r in selection.ruled_out:
+            lines.append(f"LEFT OUT  {r.repo}: {r.reason}")
     s = selection.stats
     lines.append(f"\n({s.get('turns')} model turns, {s.get('tool_calls')} lookups"
                  f"{', answer was repaired' if s.get('repaired') else ''}"
@@ -66,13 +71,43 @@ def format_selection(selection) -> str:
     return "\n".join(lines)
 
 
-def _read_repos(ask: Callable[[str], str], out: Callable[[str], None]) -> list[str]:
+def _looks_like_a_sentence(line: str) -> bool:
+    return len(line.split()) >= 4
+
+
+def _read_repos(ask: Callable[[str], str], out: Callable[[str], None],
+                pasted: Callable[[], list[str]] = lambda: []) -> tuple[list[str], str | None]:
+    """Read repo references until an empty line. Each is checked as it is
+    entered, so a typo is reported right away. Returns (repos, request): if a
+    sentence is pasted here instead of a repo, the user is asked whether it is
+    their feature request, and if so it is returned as `request` (the repo list
+    ends there)."""
+    from src import repo_sources
+
     out(PROMPT_REPOS)
-    repos = []
+    repos: list[str] = []
     while True:
-        line = ask("> ").strip()
+        try:
+            line = ask("> ").strip()
+        except EOFError:
+            return repos, None
         if not line:
-            return repos
+            return repos, None
+        try:
+            repo_sources.classify(line)
+        except DomainError as exc:
+            if _looks_like_a_sentence(line):
+                text = "\n".join([line, *pasted()]).strip()
+                out("That looks like a feature request, not a repo URL or path.")
+                try:
+                    answer = ask("Use it as your feature request? [Y/n] ").strip().lower()
+                except EOFError:
+                    answer = "n"
+                if answer in ("", "y", "yes"):
+                    return repos, text
+                continue
+            out(f"  not added: {exc}")
+            continue
         repos.append(line)
 
 
@@ -127,10 +162,15 @@ def run(argv: list[str] | None, ask: Callable[[str], str] = input,
     parser.add_argument("name", nargs="?", help="project name (asked if omitted)")
     parser.add_argument("--repo", "-r", action="append", default=[], help="git URL or absolute path; repeatable")
     parser.add_argument("--request", "-q", help="route this one request and exit (otherwise interactive)")
+    parser.add_argument("--trace", action="store_true",
+                        help="print every lookup the agent makes while investigating")
     parser.add_argument("--request-file", "-f", help="like -q, reading the request text from a file")
     args = parser.parse_args(argv)
     if args.request_file:
         args.request = Path(args.request_file).read_text()
+
+    # Only a real terminal can deliver a paste; injected `ask`s (tests) never do.
+    pasted = _drain_pasted_lines if ask is input and sys.stdin.isatty() else (lambda: [])
 
     if not os.environ.get("DATABASE_URL"):
         out("DATABASE_URL is not set, e.g.\n  export DATABASE_URL=postgresql+psycopg://<user>@localhost:5432/ppl")
@@ -148,15 +188,15 @@ def run(argv: list[str] | None, ask: Callable[[str], str] = input,
     try:
         project = projects.get_project_by_name(session, name)
         new_repos = list(args.repo)
+        pending_request: str | None = None
         if project is not None:
             existing = projects.describe(session, project)["repos"]
-            out(f"Project {name!r} already exists with {len(existing)} repo(s).")
-            if not new_repos and args.request is None:
-                out("Add more repos? " + PROMPT_REPOS.split("\n")[0].replace("Repos: ", ""))
-                new_repos = _read_repos(ask, out)
+            out(f"Project {name!r} already exists with {len(existing)} repo(s): "
+                + ", ".join(Path(r["root_path"]).name for r in existing))
+            out(EXISTING_HINT.format(name=name))
         else:
             if not new_repos:
-                new_repos = _read_repos(ask, out)
+                new_repos, pending_request = _read_repos(ask, out, pasted)
             if not new_repos:
                 out("A new project needs at least one repo.")
                 return 2
@@ -187,13 +227,11 @@ def run(argv: list[str] | None, ask: Callable[[str], str] = input,
         out("LLM_API_KEY is not set; repos are indexed, but routing needs it:\n  export LLM_API_KEY=sk-ant-...")
         return 2
 
-    # Only a real terminal can deliver a paste; injected `ask`s (tests) never do.
-    pasted = _drain_pasted_lines if ask is input and sys.stdin.isatty() else (lambda: [])
-
     def route(text: str) -> bool:
         out("Investigating ...")
         try:
-            out(format_selection(repo_router.select_repos(project_id, text)))
+            out(format_selection(repo_router.select_repos(
+                project_id, text, trace=out if args.trace else None)))
             return True
         except (DomainError, repo_router.RepoSelectionError) as exc:
             out(f"Error: {exc}")
@@ -201,6 +239,8 @@ def run(argv: list[str] | None, ask: Callable[[str], str] = input,
 
     if args.request is not None:
         return 0 if route(args.request) else 1
+    if pending_request is not None:      # a request pasted at the repo prompt
+        route(pending_request)
     while True:
         text = _read_request(ask, pasted)
         if text is None:

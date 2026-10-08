@@ -464,11 +464,18 @@ class AgentRepo(BaseModel):
     evidence: list[AgentEvidence] = Field(min_length=1)
 
 
+class AgentRuledOut(BaseModel):
+    repo: str = Field(description="Repo name exactly as list_repos returned it")
+    reason: str = Field(description="Why this repo is not touched, citing the search or file that cleared it")
+
+
 class AgentAnswer(BaseModel):
-    """The router agent's final answer. `repos` omits every repo that is
-    neither primary nor impacted."""
+    """The router agent's final answer. Every repo of the project must appear
+    exactly once: in `repos` (primary or impacted) or in `ruled_out`. Code
+    checks this, so a repo can't drop out of the answer silently."""
 
     repos: list[AgentRepo]
+    ruled_out: list[AgentRuledOut] = Field(default_factory=list)
 
 
 class SelectedRepo(BaseModel):
@@ -482,7 +489,14 @@ class ResolvedRepo(SelectedRepo):
     repo_id: int
 
 
+class RuledOutRepo(BaseModel):
+    repo: str
+    repo_id: int
+    reason: str
+
+
 class RepoSelection(BaseModel):
     project_id: int
     repos: list[ResolvedRepo]
+    ruled_out: list[RuledOutRepo] = Field(default_factory=list)
     stats: dict = Field(default_factory=dict)

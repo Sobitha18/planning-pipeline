@@ -22,6 +22,7 @@ files only).
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 from src import index_query as iq
@@ -29,9 +30,11 @@ from src.config import get_settings
 from src.llm import LLMGateway, TokenBudget, load_prompt
 from src.models import (
     AgentAnswer,
+    AgentRuledOut,
     RepoEvidence,
     RepoSelection,
     ResolvedRepo,
+    RuledOutRepo,
 )
 
 MAX_TOOL_OUTPUT_CHARS = 6000
@@ -389,6 +392,24 @@ def validate_answer(answer: AgentAnswer, repos_by_name: dict[str, dict],
                 errors.append(problem)
     if not any(s.role == "primary" for s in answer.repos):
         errors.append("no primary repo selected; at least one repo must be primary")
+
+    # Every repo must be decided explicitly: selected, or ruled out with a reason.
+    ruled: set[str] = set()
+    for r in answer.ruled_out:
+        if r.repo not in repos_by_name:
+            errors.append(f"ruled_out names {r.repo!r}, which is not in this project; valid: {sorted(repos_by_name)}")
+        elif r.repo in seen:
+            errors.append(f"repo {r.repo!r} is both selected and in ruled_out")
+        elif r.repo in ruled:
+            errors.append(f"repo {r.repo!r} is listed more than once in ruled_out")
+        ruled.add(r.repo)
+    undecided = sorted(set(repos_by_name) - seen - ruled)
+    if undecided:
+        errors.append(
+            "these repos were not decided: " + ", ".join(undecided)
+            + ". Every repo must be either in `repos` or in `ruled_out` with a reason "
+            "(search for it first if you have not looked at it)."
+        )
     return errors
 
 
@@ -409,6 +430,12 @@ def prune_invalid_citations(answer: AgentAnswer, repos_by_name: dict[str, dict],
         elif sel.repo in repos_by_name:
             dropped.append({"repo": sel.repo, "file": None, "reason": "no valid evidence; repo removed"})
     pruned.repos = keep
+    # a repo whose evidence was all invalid is now undecided: rule it out so the
+    # answer stays complete (the reason says why it is not listed)
+    for d in dropped:
+        if d.get("file") is None and d["repo"] in repos_by_name:
+            pruned.ruled_out.append(AgentRuledOut(
+                repo=d["repo"], reason="dropped: its cited evidence could not be verified"))
     return pruned, dropped
 
 
@@ -426,6 +453,13 @@ def resolve_answer(answer: AgentAnswer, repos_by_name: dict[str, dict],
     return resolved
 
 
+def resolve_ruled_out(answer: AgentAnswer, repos_by_name: dict[str, dict]) -> list[RuledOutRepo]:
+    return [
+        RuledOutRepo(repo=r.repo, repo_id=repos_by_name[r.repo]["id"], reason=r.reason)
+        for r in answer.ruled_out if r.repo in repos_by_name
+    ]
+
+
 # ------------------------------------------------------------------ router
 
 
@@ -434,6 +468,40 @@ def _user_prompt(request_text: str, attachments: list[str] | None) -> str:
     for i, att in enumerate(attachments or [], 1):
         parts.append(f"## Attachment {i}\n{att[:3000]}")
     return "\n\n".join(parts)
+
+
+def summarize_result(result: str) -> str:
+    """One short line describing a tool result, for --trace."""
+    import re
+
+    if result.startswith("error:"):
+        return result[:160]
+    hits = re.findall(r"^## (\S+) \((\d+) hit", result, re.M)
+    if hits:
+        return "hits in " + ", ".join(f"{repo}({n})" for repo, n in hits)
+    first = result.strip().splitlines()[0] if result.strip() else "(empty)"
+    n = len(result.strip().splitlines())
+    return first[:100] if n == 1 else f"{n} lines, first: {first[:80]}"
+
+
+def _traced(tools: "RouterTools", trace: Callable[[str], None]) -> Callable[[str, dict], str]:
+    """Wrap tools.call so every lookup the agent makes is reported as it
+    happens, with a one-line summary of what came back."""
+    count = 0
+
+    def call(name: str, args: dict) -> str:
+        nonlocal count
+        count += 1
+        shown = json.dumps(args, ensure_ascii=False)
+        try:
+            result = tools.call(name, args)
+        except Exception as exc:  # noqa: BLE001 - re-raised below, the loop reports it to the model
+            trace(f"  {count:>2}. {name} {shown}\n        -> ERROR: {exc}"[:400])
+            raise
+        trace(f"  {count:>2}. {name} {shown}\n        -> {summarize_result(result)}")
+        return result
+
+    return call
 
 
 def _parse_answer(text: str) -> AgentAnswer | str:
@@ -454,7 +522,10 @@ def select_repos(
     gateway: LLMGateway | None = None,
     run_id: int | None = None,
     budget: TokenBudget | None = None,
+    trace: Callable[[str], None] | None = None,
 ) -> RepoSelection:
+    """`trace`, if given, is called with one block of text per lookup the agent
+    makes (the tool, its arguments, and what came back), as it happens."""
     repos = iq.get_project_repos(project_id)
     if not repos:
         raise RepoSelectionError(f"project {project_id} has no repos")
@@ -475,7 +546,7 @@ def select_repos(
 
     loop = gateway.run_tool_loop(
         tier=settings.router_tier, system=system, user=user,
-        tools=TOOLS, handler=tools.call, max_turns=settings.router_max_turns,
+        tools=TOOLS, handler=_traced(tools, trace) if trace else tools.call, max_turns=settings.router_max_turns,
         purpose="repo_router", run_id=run_id, budget=budget,
     )
 
@@ -512,6 +583,7 @@ def select_repos(
     return RepoSelection(
         project_id=project_id,
         repos=resolve_answer(answer, by_name, registry),
+        ruled_out=resolve_ruled_out(answer, by_name),
         stats={
             "turns": loop.turns,
             "tool_calls": len(loop.tool_calls),

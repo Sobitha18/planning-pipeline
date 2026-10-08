@@ -40,11 +40,18 @@ def sel(repo, role="primary", files=("F1",)):
             "evidence": [{"file": f, "note": "n"} for f in files]}
 
 
-def ans(*repos):
-    return AgentAnswer.model_validate({"repos": list(repos)})
-
-
 BY_NAME = {"api": {"id": 1}, "web": {"id": 2}}
+
+
+def ans(*repos, ruled="rest"):
+    """An AgentAnswer. By default every project repo not in `repos` is ruled
+    out (so a test only has to say what it is about); pass ruled=[] to leave
+    repos undecided, or ruled=[{"repo":..,"reason":..}] explicitly."""
+    if ruled == "rest":
+        chosen = {r["repo"] for r in repos}
+        ruled = [{"repo": n, "reason": "no link found"} for n in BY_NAME if n not in chosen]
+    return AgentAnswer.model_validate({"repos": list(repos), "ruled_out": ruled})
+
 REGISTRY_FILES = [("api", "a.py"), ("web", "w.ts"), ("api", "b.py")]    # F1, F2, F3
 
 
@@ -99,6 +106,23 @@ def test_validate_needs_a_primary_and_no_duplicates():
     assert any("more than once" in e for e in rr.validate_answer(ans(sel("api"), sel("api")), BY_NAME, reg))
 
 
+def test_every_repo_must_be_decided_a_silently_dropped_repo_is_an_error():
+    """The harbor-mobile case: a repo is simply left out of the answer."""
+    reg = reg_with(*REGISTRY_FILES)
+    errs = rr.validate_answer(ans(sel("api"), ruled=[]), BY_NAME, reg)
+    assert len(errs) == 1 and "these repos were not decided: web" in errs[0]
+
+
+def test_ruled_out_must_be_valid_and_not_overlap_the_selection():
+    reg = reg_with(*REGISTRY_FILES)
+    errs = rr.validate_answer(ans(sel("api"), ruled=[{"repo": "web", "reason": "x"}, {"repo": "ghost", "reason": "x"}]), BY_NAME, reg)
+    assert any("'ghost', which is not in this project" in e for e in errs)
+    errs = rr.validate_answer(ans(sel("api"), ruled=[{"repo": "api", "reason": "x"}, {"repo": "web", "reason": "x"}]), BY_NAME, reg)
+    assert any("'api' is both selected and in ruled_out" in e for e in errs)
+    errs = rr.validate_answer(ans(sel("api"), ruled=[{"repo": "web", "reason": "x"}, {"repo": "web", "reason": "y"}]), BY_NAME, reg)
+    assert any("'web' is listed more than once in ruled_out" in e for e in errs)
+
+
 def test_evidence_is_required_by_schema():
     with pytest.raises(Exception):
         ans({"repo": "api", "role": "primary", "reason": "r", "evidence": []})
@@ -111,6 +135,9 @@ def test_prune_keeps_valid_citations_and_drops_repos_left_with_none():
     assert [(s.repo, [e.file for e in s.evidence]) for s in pruned.repos] == [("api", ["F1"])]
     assert {"repo": "api", "file": "F99"} in dropped
     assert any(d["repo"] == "web" and d["file"] is None for d in dropped)
+    # a repo that lost all its evidence is ruled out, so the answer stays complete
+    assert [r.repo for r in pruned.ruled_out if "could not be verified" in r.reason] == ["web"]
+    assert rr.validate_answer(pruned, BY_NAME, reg) == []
 
 
 def test_resolve_writes_real_paths_primary_first():
@@ -120,6 +147,8 @@ def test_resolve_writes_real_paths_primary_first():
     assert [(r.repo, r.role, r.repo_id) for r in out] == [("api", "primary", 1), ("web", "impacted", 2)]
     assert [e.path for e in out[0].evidence] == ["b.py", "a.py"]      # paths come from the registry
     assert [e.path for e in out[1].evidence] == ["w.ts"]
+    ruled = rr.resolve_ruled_out(ans(sel("api"), ruled=[{"repo": "web", "reason": "not related"}]), BY_NAME)
+    assert [(r.repo, r.repo_id, r.reason) for r in ruled] == [("web", 2, "not related")]
 
 
 # ------------------------------------------------------- DB-backed fixtures
@@ -232,9 +261,19 @@ class FakeGateway:
         self.tool_calls, self.final, self.repair = tool_calls, final, repair
         self.results, self.repair_calls, self.repair_user = [], 0, ""
 
+    @staticmethod
+    def _complete(answer):
+        """Dict answers that don't mention `ruled_out` get every other repo
+        ruled out, so a test only spells out what it is about."""
+        if isinstance(answer, dict) and "ruled_out" not in answer:
+            chosen = {r["repo"] for r in answer["repos"]}
+            answer = {**answer, "ruled_out": [
+                {"repo": d, "reason": "no link found by any search"} for d in REPO_DIRS if d not in chosen]}
+        return answer
+
     def run_tool_loop(self, *, handler, tools, **kw):
         self.results = [handler(name, args) for name, args in self.tool_calls]
-        text = self.final("\n".join(self.results))
+        text = self._complete(self.final("\n".join(self.results)))
         return ToolLoopResult(text=text if isinstance(text, str) else json.dumps(text),
                               turns=len(self.tool_calls) + 1,
                               tool_calls=[{"name": n} for n, _ in self.tool_calls])
@@ -242,7 +281,7 @@ class FakeGateway:
     def complete_json(self, *, user, schema, **kw):
         self.repair_calls += 1
         self.repair_user = user
-        reply = self.repair(user)
+        reply = self._complete(self.repair(user))
         return schema.model_validate(reply)
 
 
@@ -348,3 +387,71 @@ def test_select_repos_raises_if_nothing_valid_survives(project_id):
 def test_select_repos_empty_project_raises(db_url):
     with pytest.raises(rr.RepoSelectionError, match="no repos"):
         rr.select_repos(999999, "x", gateway=FakeGateway([], lambda r: "{}"))
+
+
+# --- trace: every lookup the agent makes is reported -------------------------
+
+
+def test_summarize_result_is_one_short_line():
+    assert rr.summarize_result("## api (3 hits)\n- [F1] a\n\n## web (2 hits)\n- [F4] b") == "hits in api(3), web(2)"
+    assert rr.summarize_result("no hits") == "no hits"
+    assert rr.summarize_result("[F2] x.py\n1: a\n2: b").startswith("3 lines, first: [F2] x.py")
+    assert rr.summarize_result("error: unknown repo") == "error: unknown repo"
+
+
+def test_trace_reports_each_lookup_with_its_arguments_and_outcome(project_id):
+    lines: list[str] = []
+    gw = FakeGateway(SEARCH_API, api_and_web_answer)
+    rr.select_repos(project_id, "x", gateway=gw, trace=lines.append)
+    assert len(lines) == 2
+    assert lines[0].lstrip().startswith("1. list_repos {}")
+    assert lines[1].lstrip().startswith('2. search_code {"query": "/api/orders", "mode": "literal"}')
+    assert "hits in orders-api(1), storefront-web(2)" in lines[1]
+
+
+def test_trace_reports_tool_errors_and_does_not_swallow_them(project_id):
+    lines: list[str] = []
+    gw = FakeGateway([("list_files", {"repo": "nope"})], lambda r: "{}", repair=lambda u: (_ for _ in ()).throw(AssertionError))
+    with pytest.raises(ValueError, match="valid repos"):      # the error still reaches the tool loop
+        rr.select_repos(project_id, "x", gateway=gw, trace=lines.append)
+    assert "ERROR: unknown repo 'nope'" in lines[0]
+
+
+def test_no_trace_means_no_wrapping(project_id):
+    gw = FakeGateway(SEARCH_API, api_and_web_answer)
+    assert rr.select_repos(project_id, "x", gateway=gw).stats["tool_calls"] == 2
+
+
+# --- every repo is decided: the silent-omission fix ---------------------------
+
+
+def test_ruled_out_repos_are_returned_with_their_reasons(project_id):
+    gw = FakeGateway(SEARCH_API, api_and_web_answer)
+    result = rr.select_repos(project_id, "x", gateway=gw)
+    assert sorted(r.repo for r in result.ruled_out) == ["analytics-jobs", "inventory-service"]
+    assert all(r.reason and r.repo_id for r in result.ruled_out)
+
+
+def test_a_repo_left_out_without_a_decision_is_repaired_not_dropped(project_id):
+    """The harbor-mobile bug: the agent just never mentions a repo. Now that is
+    rejected, the repair is told which repo is undecided, and it must decide."""
+    def final(results):                      # analytics-jobs is never mentioned
+        return {**api_and_web_answer(results),
+                "ruled_out": [{"repo": "inventory-service", "reason": "unrelated"}]}
+
+    def repair(user):
+        return {"repos": [
+            {"repo": "orders-api", "role": "primary", "reason": "r",
+             "evidence": [{"file": listing_id(user, "orders-api", "src/orders/routes.py"), "note": "n"}]},
+            {"repo": "analytics-jobs", "role": "impacted", "reason": "reads orders",
+             "evidence": [{"file": listing_id(user, "analytics-jobs", "src/reports/daily_revenue.py"), "note": "n"}]},
+        ], "ruled_out": [{"repo": "inventory-service", "reason": "unrelated"},
+                         {"repo": "storefront-web", "reason": "no change needed"}]}
+
+    calls = SEARCH_API + [("search_code", {"query": "orders", "mode": "literal"})]
+    gw = FakeGateway(calls, final, repair)
+    result = rr.select_repos(project_id, "x", gateway=gw)
+    assert gw.repair_calls == 1
+    assert "these repos were not decided: analytics-jobs" in gw.repair_user
+    assert {r.repo for r in result.repos} == {"orders-api", "analytics-jobs"}
+    assert result.stats["repaired"] is True
