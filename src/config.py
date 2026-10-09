@@ -32,6 +32,12 @@ class Settings:
     # Gate 2 chat's turn cap per plan version — same tunable-threshold pattern
     # as the two above, not a schema limit.
     max_chat_turns: int
+    # Repo router (multi-repo): which model tier drives the investigation agent
+    # and how many tool-use turns it gets before it must answer.
+    router_tier: str
+    router_max_turns: int
+    # Where git-URL repos are cloned (REPOS_DIR/<host>/<owner>/<repo>).
+    repos_dir: str
 
 
 def get_settings() -> Settings:
@@ -45,4 +51,7 @@ def get_settings() -> Settings:
         max_plan_tasks=int(os.environ.get("MAX_PLAN_TASKS", "10")),
         max_touchable_files=int(os.environ.get("MAX_TOUCHABLE_FILES", "25")),
         max_chat_turns=int(os.environ.get("MAX_CHAT_TURNS", "12")),
+        router_tier=os.environ.get("ROUTER_TIER", "cheap"),
+        router_max_turns=int(os.environ.get("ROUTER_MAX_TURNS", "12")),
+        repos_dir=os.environ.get("REPOS_DIR", "~/.planning-pipeline/repos"),
     )

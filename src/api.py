@@ -18,10 +18,10 @@ from pathlib import Path
 from fastapi import FastAPI, Header
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import func, select
 
-from src import runs
+from src import projects, repo_router, repo_sources, runs
 from src.db import get_session, init_schema
 from src.indexer.edges import build_edges
 from src.indexer.full_index import index_repo
@@ -77,6 +77,10 @@ _DOMAIN_STATUS = {
     runs.TaskNotFound: (404, "Task Not Found"),
     runs.SpecInvalid: (422, "Spec Invalid"),
     runs.ChatLimitReached: (409, "Chat Limit Reached"),
+    projects.ProjectNotFound: (404, "Project Not Found"),
+    projects.ProjectNameTaken: (409, "Project Name Taken"),
+    projects.ProjectNotReady: (409, "Project Not Ready"),
+    repo_sources.RepoSourceError: (422, "Invalid Repo Source"),
 }
 
 
@@ -90,6 +94,11 @@ async def handle_domain_error(request, exc: runs.DomainError):
         if isinstance(exc, exc_type):
             return _problem(status, title, str(exc), **extensions)
     return _problem(500, "Internal Error", str(exc))
+
+
+@app.exception_handler(repo_router.RepoSelectionError)
+async def handle_repo_selection_error(request, exc: repo_router.RepoSelectionError):
+    return _problem(502, "Repo Selection Failed", str(exc))
 
 
 @app.exception_handler(RequestValidationError)
@@ -151,6 +160,31 @@ class ChatBody(BaseModel):
 
 class RegisterRepoBody(BaseModel):
     root_path: str
+
+
+class CreateProjectBody(BaseModel):
+    """`repos` are git URLs or absolute paths (mixable); `repo_ids` are repos
+    already registered via /v1/repos. Either or both."""
+
+    name: str = Field(min_length=1)
+    repos: list[str] = Field(default_factory=list)
+    repo_ids: list[int] = Field(default_factory=list)
+
+
+class AddProjectRepoBody(BaseModel):
+    repo: str | None = None       # git URL or absolute path
+    repo_id: int | None = None    # already registered
+
+    @model_validator(mode="after")
+    def _exactly_one(self):
+        if (self.repo is None) == (self.repo_id is None):
+            raise ValueError("supply exactly one of `repo` or `repo_id`")
+        return self
+
+
+class SelectReposBody(BaseModel):
+    text: str
+    attachments: list[str] = Field(default_factory=list)
 
 
 # -------------------------------------------------------------- idempotency
@@ -271,6 +305,73 @@ def reindex_repo(repo_id: int, idempotency_key: str = Header(alias="Idempotency-
         return _save(session, idempotency_key, endpoint, 202, {"status": "building"})
     finally:
         session.close()
+
+
+# ---------------------------------------------------------------- projects
+# A project is a set of registered repos. select-repos is the multi-repo
+# routing step: which of the project's repos a request touches. Synchronous
+# (one agent investigation, tens of seconds) and read-only — nothing is
+# stored — so no idempotency key.
+
+
+def _start_indexing(repo_id: int) -> None:
+    EXECUTOR.submit(_index_repo_job, repo_id)
+
+
+@app.post("/v1/projects", status_code=201)
+def create_project_endpoint(body: CreateProjectBody):
+    """Name a project and give it repos as git URLs and/or absolute paths.
+    URLs are cloned (blocking, so git errors come back right here); every repo
+    is then indexed in the background. Poll GET /v1/projects/{id} until all
+    repos are `ready`, then call select-repos."""
+    session = get_session()
+    try:
+        projects.ensure_name_free(session, body.name)
+        projects.require_repos_exist(session, body.repo_ids)
+        added = projects.register_sources(session, body.repos, _start_indexing)
+        ids = body.repo_ids + [a["repo_id"] for a in added]
+        project = projects.create_project(session, body.name, ids)
+        return {**projects.describe(session, project), "added": added}
+    finally:
+        session.close()
+
+
+@app.get("/v1/projects/{project_id}")
+def get_project_endpoint(project_id: int):
+    session = get_session()
+    try:
+        return projects.describe(session, projects.get_project(session, project_id))
+    finally:
+        session.close()
+
+
+@app.post("/v1/projects/{project_id}/repos")
+def add_project_repo_endpoint(project_id: int, body: AddProjectRepoBody):
+    session = get_session()
+    try:
+        projects.get_project(session, project_id)
+        added = []
+        if body.repo is not None:
+            added = projects.register_sources(session, [body.repo], _start_indexing)
+            repo_id = added[0]["repo_id"]
+        else:
+            repo_id = body.repo_id
+        project = projects.add_repo(session, project_id, repo_id)
+        return {**projects.describe(session, project), "added": added}
+    finally:
+        session.close()
+
+
+@app.post("/v1/projects/{project_id}/select-repos")
+def select_repos_endpoint(project_id: int, body: SelectReposBody):
+    session = get_session()
+    try:
+        projects.get_project(session, project_id)
+    finally:
+        session.close()
+    projects.require_ready(project_id)
+    selection = repo_router.select_repos(project_id, body.text, body.attachments)
+    return selection.model_dump()
 
 
 # -------------------------------------------------------------------- runs
