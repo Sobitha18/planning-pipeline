@@ -71,6 +71,17 @@ def format_selection(selection) -> str:
     return "\n".join(lines)
 
 
+def split_type_prefix(text: str, given: str | None) -> tuple[str, str | None]:
+    """A request may start with 'bug:' or 'feature:' to state its type. An
+    explicit --type wins; the prefix is removed either way."""
+    import re
+
+    m = re.match(r"\s*(bug|feature)\s*:\s*", text, re.I)
+    if m:
+        return text[m.end():], given or m.group(1).lower()
+    return text, given
+
+
 def _looks_like_a_sentence(line: str) -> bool:
     return len(line.split()) >= 4
 
@@ -162,12 +173,24 @@ def run(argv: list[str] | None, ask: Callable[[str], str] = input,
     parser.add_argument("name", nargs="?", help="project name (asked if omitted)")
     parser.add_argument("--repo", "-r", action="append", default=[], help="git URL or absolute path; repeatable")
     parser.add_argument("--request", "-q", help="route this one request and exit (otherwise interactive)")
+    parser.add_argument("--type", dest="request_type", choices=repo_router.REQUEST_TYPES,
+                        help="say whether the request is a feature or a bug (default: the agent decides; "
+                             "you can also start the request with 'bug:' or 'feature:')")
+    parser.add_argument("--attachment", "-a", action="append", default=[], metavar="FILE",
+                        help="text file with extra context, e.g. a stack trace or log excerpt; repeatable")
     parser.add_argument("--trace", action="store_true",
                         help="print every lookup the agent makes while investigating")
     parser.add_argument("--request-file", "-f", help="like -q, reading the request text from a file")
     args = parser.parse_args(argv)
     if args.request_file:
         args.request = Path(args.request_file).read_text()
+    attachments: list[str] = []
+    for attachment in args.attachment:
+        try:
+            attachments.append(Path(attachment).read_text(errors="replace"))
+        except OSError as exc:
+            out(f"Cannot read attachment {attachment!r}: {exc}")
+            return 2
 
     # Only a real terminal can deliver a paste; injected `ask`s (tests) never do.
     pasted = _drain_pasted_lines if ask is input and sys.stdin.isatty() else (lambda: [])
@@ -223,15 +246,24 @@ def run(argv: list[str] | None, ask: Callable[[str], str] = input,
     finally:
         session.close()
 
+    from src.config import get_settings
+    tier = get_settings().router_tier
+    if tier not in ("cheap", "strong"):
+        out(f"ROUTER_TIER={tier!r} is not valid: use 'cheap' (small, fast model) or 'strong' (larger model).\n"
+            "Fix it in .env or your environment. Repos are indexed; nothing was routed.")
+        return 2
+
     if not os.environ.get("LLM_API_KEY"):
         out("LLM_API_KEY is not set; repos are indexed, but routing needs it:\n  export LLM_API_KEY=sk-ant-...")
         return 2
 
     def route(text: str) -> bool:
-        out("Investigating ...")
+        text, request_type = split_type_prefix(text, args.request_type)
+        out("Investigating" + (f" (as a {request_type})" if request_type else "") + " ...")
         try:
             out(format_selection(repo_router.select_repos(
-                project_id, text, trace=out if args.trace else None)))
+                project_id, text, attachments=attachments or None, trace=out if args.trace else None,
+                request_type=request_type)))
             return True
         except (DomainError, repo_router.RepoSelectionError) as exc:
             out(f"Error: {exc}")

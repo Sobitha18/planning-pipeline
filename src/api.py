@@ -11,6 +11,7 @@ async DB, a real queue, partial regeneration.
 from __future__ import annotations
 
 import uuid
+from typing import Literal
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -184,7 +185,8 @@ class AddProjectRepoBody(BaseModel):
 
 class SelectReposBody(BaseModel):
     text: str
-    attachments: list[str] = Field(default_factory=list)
+    attachments: list[str] = Field(default_factory=list)   # e.g. a stack trace
+    type: Literal["feature", "bug"] | None = None          # None: the agent decides
 
 
 # -------------------------------------------------------------- idempotency
@@ -370,7 +372,8 @@ def select_repos_endpoint(project_id: int, body: SelectReposBody):
     finally:
         session.close()
     projects.require_ready(project_id)
-    selection = repo_router.select_repos(project_id, body.text, body.attachments)
+    selection = repo_router.select_repos(
+        project_id, body.text, body.attachments, request_type=body.type)
     return selection.model_dump()
 
 

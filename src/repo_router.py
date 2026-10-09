@@ -26,6 +26,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from src import index_query as iq
+from src import report_files
 from src.config import get_settings
 from src.llm import LLMGateway, TokenBudget, load_prompt
 from src.models import (
@@ -463,10 +464,24 @@ def resolve_ruled_out(answer: AgentAnswer, repos_by_name: dict[str, dict]) -> li
 # ------------------------------------------------------------------ router
 
 
-def _user_prompt(request_text: str, attachments: list[str] | None) -> str:
-    parts = [f"## Request\n{request_text}"]
+REQUEST_TYPES = ("feature", "bug")
+ATTACHMENT_CHARS = 6000        # a stack trace is the typical attachment; keep room for a real one
+
+
+def _user_prompt(request_text: str, attachments: list[str] | None,
+                 request_type: str | None = None,
+                 located: list[tuple[str, report_files.Located]] | None = None) -> str:
+    """`located` is (file number, file) for files named in the report that exist
+    in the index; they are already registered, so the agent can cite them."""
+    parts = []
+    if request_type:
+        parts.append(f"## Request type\n{request_type} (stated by the user)")
+    parts.append(f"## Request\n{request_text}")
     for i, att in enumerate(attachments or [], 1):
-        parts.append(f"## Attachment {i}\n{att[:3000]}")
+        parts.append(f"## Attachment {i}\n{att[:ATTACHMENT_CHARS]}")
+    if located:
+        rows = [f"- [{fid}] {f.repo}: {f.path}" + (f" (line {f.line})" if f.line else "") for fid, f in located]
+        parts.append("## Files named in the report (found in the index; cite them by number)\n" + "\n".join(rows))
     return "\n\n".join(parts)
 
 
@@ -523,9 +538,14 @@ def select_repos(
     run_id: int | None = None,
     budget: TokenBudget | None = None,
     trace: Callable[[str], None] | None = None,
+    request_type: str | None = None,
 ) -> RepoSelection:
     """`trace`, if given, is called with one block of text per lookup the agent
-    makes (the tool, its arguments, and what came back), as it happens."""
+    makes (the tool, its arguments, and what came back), as it happens.
+    `request_type` ("feature" or "bug") is passed to the agent as stated by the
+    user; left as None, the agent decides from the text."""
+    if request_type is not None and request_type not in REQUEST_TYPES:
+        raise RepoSelectionError(f"request type must be one of {REQUEST_TYPES}, not {request_type!r}")
     repos = iq.get_project_repos(project_id)
     if not repos:
         raise RepoSelectionError(f"project {project_id} has no repos")
@@ -540,9 +560,15 @@ def select_repos(
         "at the limit the tools are switched off and you must answer from what you have."
     )
     system = f"{load_prompt('repo_router')}\n\n{budget_note}\n\nSchema:\n{schema_json}"
-    user = _user_prompt(request_text, attachments)
     registry = EvidenceRegistry()
     tools = RouterTools(by_name, registry)
+    paths_by_repo = {n: set(iq.list_paths(r["id"])) for n, r in by_name.items()}
+    # Files the report itself names (stack frames, mentioned paths) that exist
+    # in the index: found by code, numbered, and handed to the agent up front.
+    mentions = report_files.extract_mentions([request_text, *(attachments or [])])
+    located = [(registry.ref(f.repo, f.path), f)
+               for f in report_files.locate(mentions, paths_by_repo)]
+    user = _user_prompt(request_text, attachments, request_type, located)
 
     loop = gateway.run_tool_loop(
         tier=settings.router_tier, system=system, user=user,
@@ -590,6 +616,8 @@ def select_repos(
             "exhausted": loop.exhausted,
             "repaired": repaired,
             "files_numbered": len(registry),
+            "files_named_in_report": len(located),
+            "request_type": request_type,
             "dropped_evidence": dropped,
         },
     )
