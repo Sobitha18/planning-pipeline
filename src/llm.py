@@ -72,6 +72,12 @@ def _estimate_tokens(prompt: str, max_tokens: int) -> int:
     return int(len(prompt) / 3.5) + max_tokens
 
 
+def _thinking_off(model: str) -> dict:
+    """The `thinking` param that means "no reasoning" for this model. Sonnet-5
+    models reject {"type": "disabled"} and want "between_tools" instead."""
+    return {"type": "between_tools"} if "sonnet-5" in model else {"type": "disabled"}
+
+
 def _strip_fences(text: str) -> str:
     """Strip a leading/trailing ```` ```json ... ``` ```` fence if present."""
     t = text.strip()
@@ -131,12 +137,33 @@ class ToolLoopResult:
     turns: int                     # model calls made
     tool_calls: list[dict] = field(default_factory=list)   # [{name, input, error}]
     exhausted: bool = False        # True if max_turns forced the final answer
+    cache_read_tokens: int = 0     # prompt tokens served from the cache
+    cache_write_tokens: int = 0    # prompt tokens written to the cache
+
+
+def _with_cache_breakpoint(messages: list[dict]) -> list[dict]:
+    """Copy of `messages` with a cache breakpoint on the last content block.
+
+    The cached prefix is tools + system + every message up to that block, so
+    each turn of a tool loop re-reads the whole history at the cache-read price
+    and only pays full price for what was added since. A copy, because the
+    breakpoint must move every turn (the API allows only 4) and the stored
+    history must stay clean."""
+    last = messages[-1]
+    content = last["content"]
+    blocks = [{"type": "text", "text": content}] if isinstance(content, str) else [dict(b) for b in content]
+    blocks[-1] = {**blocks[-1], "cache_control": {"type": "ephemeral"}}
+    return [*messages[:-1], {**last, "content": blocks}]
 
 
 def _block_to_param(block) -> dict:
     """Response content block -> the dict shape messages.create accepts back."""
     if block.type == "tool_use":
         return {"type": "tool_use", "id": block.id, "name": block.name, "input": block.input}
+    if block.type in ("thinking", "redacted_thinking"):
+        # Sonnet-5 returns its between-tool updates as thinking blocks; they
+        # must go back verbatim (signature included), never as empty text.
+        return block.model_dump(exclude_none=True)
     return {"type": "text", "text": getattr(block, "text", "")}
 
 
@@ -203,7 +230,7 @@ class LLMGateway:
                     # ponytail: blanket disable at the choke point. If a call
                     # ever needs reasoning, give complete_json a `thinking`
                     # arg and budget max_tokens for both halves.
-                    thinking={"type": "disabled"},
+                    thinking=_thinking_off(model),
                     messages=messages,
                 )
             except Exception as exc:
@@ -326,6 +353,7 @@ class LLMGateway:
         calls: list[dict] = []
         turns = 0
         exhausted = False
+        cache_read = cache_write = 0
 
         while True:
             force_answer = turns >= max_turns
@@ -349,8 +377,8 @@ class LLMGateway:
                     max_tokens=max_tokens,
                     system=system,
                     tools=tools,
-                    thinking={"type": "disabled"},
-                    messages=messages,
+                    thinking=_thinking_off(model),
+                    messages=_with_cache_breakpoint(messages),
                     **kwargs,
                 )
             except Exception as exc:
@@ -362,8 +390,12 @@ class LLMGateway:
                 )
                 raise
             turns += 1
+            # input_tokens is the UNCACHED part only; cache reads/writes are
+            # reported separately and billed at their own rates.
             in_tok = response.usage.input_tokens
             out_tok = response.usage.output_tokens
+            cache_read += getattr(response.usage, "cache_read_input_tokens", 0) or 0
+            cache_write += getattr(response.usage, "cache_creation_input_tokens", 0) or 0
             if budget is not None:
                 budget.add(in_tok + out_tok)
             _log_call(
@@ -376,7 +408,10 @@ class LLMGateway:
             tool_uses = [b for b in response.content if b.type == "tool_use"]
             if not tool_uses or force_answer:
                 text = "".join(b.text for b in response.content if b.type == "text")
-                return ToolLoopResult(text=text, turns=turns, tool_calls=calls, exhausted=exhausted)
+                return ToolLoopResult(
+                    text=text, turns=turns, tool_calls=calls, exhausted=exhausted,
+                    cache_read_tokens=cache_read, cache_write_tokens=cache_write,
+                )
 
             messages.append({"role": "assistant", "content": [_block_to_param(b) for b in response.content]})
             results = []

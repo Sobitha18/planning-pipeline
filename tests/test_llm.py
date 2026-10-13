@@ -390,7 +390,23 @@ def test_tool_loop_max_turns_forces_an_answer_with_tools_off(gateway, monkeypatc
     assert result.text == "forced answer" and result.exhausted is True
     assert "tool_choice" not in fake.calls[0] and "tool_choice" not in fake.calls[1]
     assert fake.calls[2]["tool_choice"] == {"type": "none"}
-    assert "Tool budget exhausted" in fake.calls[2]["messages"][-1]["content"]
+    assert "Tool budget exhausted" in fake.calls[2]["messages"][-1]["content"][-1]["text"]
+
+
+def test_tool_loop_puts_one_cache_breakpoint_on_the_last_block_each_turn(gateway, monkeypatch):
+    fake = install_fake(monkeypatch, gateway, [
+        FakeToolMessage([FakeToolUse("t1", "echo", {})]),
+        FakeToolMessage([FakeToolUse("t2", "echo", {})]),
+        FakeMessage("done"),
+    ])
+    gateway.run_tool_loop(tier="cheap", system="s", user="u", tools=TOOLS, handler=lambda n, a: "ok")
+
+    for call in fake.calls:
+        blocks = [b for m in call["messages"] for b in (
+            m["content"] if isinstance(m["content"], list) else [])]
+        marked = [b for b in blocks if "cache_control" in b]
+        assert len(marked) == 1                      # the API allows at most 4; we use 1
+        assert marked[-1] is blocks[-1]              # and it is on the newest block
 
 
 def test_tool_loop_respects_token_budget(gateway, monkeypatch):

@@ -66,6 +66,9 @@ def format_selection(selection) -> str:
     lines.append(f"\n({s.get('turns')} model turns, {s.get('tool_calls')} lookups"
                  f"{', answer was repaired' if s.get('repaired') else ''}"
                  f"{', hit the lookup limit' if s.get('exhausted') else ''})")
+    if s.get("cache_read_tokens") or s.get("cache_write_tokens"):
+        lines.append(f"(prompt cache: {s.get('cache_read_tokens', 0)} tokens read, "
+                     f"{s.get('cache_write_tokens', 0)} written)")
     for d in s.get("dropped_evidence") or []:
         lines.append(f"note: dropped an invalid citation in {d['repo']}: {d.get('file') or d.get('reason')}")
     return "\n".join(lines)

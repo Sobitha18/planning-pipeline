@@ -614,6 +614,8 @@ def select_repos(
             "turns": loop.turns,
             "tool_calls": len(loop.tool_calls),
             "exhausted": loop.exhausted,
+            "cache_read_tokens": loop.cache_read_tokens,
+            "cache_write_tokens": loop.cache_write_tokens,
             "repaired": repaired,
             "files_numbered": len(registry),
             "files_named_in_report": len(located),

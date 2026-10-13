@@ -267,3 +267,58 @@ def test_left_out_repos_are_shown_with_their_reasons():
     text = cli.format_selection(sel)
     assert "LEFT OUT  harbor-billing: reads orders.total only; searched 'orders'" in text
     assert text.index("PRIMARY") < text.index("LEFT OUT")
+
+
+def test_an_invalid_router_tier_is_explained_not_a_traceback(monkeypatch):
+    monkeypatch.setenv("ROUTER_TIER", "weak")
+    s = Session()
+    assert cli.run([name(), "-r", str(MULTI / "orders-api"), "-q", "x"], s.ask, s.out) == 2
+    assert "ROUTER_TIER='weak' is not valid: use 'cheap'" in s.text
+
+
+# --- bugs: --type, a "bug:" prefix, attachments -------------------------------
+
+
+def test_type_prefix_and_flag_parsing():
+    assert cli.split_type_prefix("bug: totals are wrong", None) == ("totals are wrong", "bug")
+    assert cli.split_type_prefix("  Feature : add coupons", None) == ("add coupons", "feature")
+    assert cli.split_type_prefix("bug: x", "feature") == ("x", "feature")     # explicit --type wins
+    assert cli.split_type_prefix("debugging is hard", None) == ("debugging is hard", None)
+    assert cli.split_type_prefix("add coupons", "bug") == ("add coupons", "bug")
+
+
+def test_type_and_attachments_reach_the_router(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake(project_id, text, **kw):
+        seen.update(text=text, **kw)
+        return RepoSelection(project_id=project_id, repos=[], stats={})
+
+    monkeypatch.setattr(repo_router, "select_repos", fake)
+    trace = tmp_path / "trace.txt"
+    trace.write_text("Traceback ... KeyError: 'total'")
+    s = Session()
+    code = cli.run([name(), "-r", str(MULTI / "orders-api"), "--type", "bug", "-a", str(trace),
+                    "-q", "Creating an order fails"], s.ask, s.out)
+    assert code == 0
+    assert seen["request_type"] == "bug" and seen["text"] == "Creating an order fails"
+    assert seen["attachments"] == ["Traceback ... KeyError: 'total'"]
+    assert "Investigating (as a bug) ..." in s.text
+
+
+def test_a_bug_prefix_in_the_typed_request_sets_the_type(monkeypatch):
+    seen = {}
+
+    def fake(project_id, text, **kw):
+        seen.update(text=text, **kw)
+        return RepoSelection(project_id=project_id, repos=[], stats={})
+
+    monkeypatch.setattr(repo_router, "select_repos", fake)
+    cli.run([name(), "-r", str(MULTI / "orders-api"), "-q", "bug: totals are wrong"], Session().ask, lambda _: None)
+    assert seen["request_type"] == "bug" and seen["text"] == "totals are wrong" and seen["attachments"] is None
+
+
+def test_an_unreadable_attachment_is_a_clear_error(fake_router):
+    s = Session()
+    assert cli.run([name(), "-r", str(MULTI / "orders-api"), "-a", "/no/such/file.txt", "-q", "x"], s.ask, s.out) == 2
+    assert "Cannot read attachment" in s.text and fake_router == []

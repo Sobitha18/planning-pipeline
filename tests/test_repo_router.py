@@ -260,6 +260,7 @@ class FakeGateway:
     def __init__(self, tool_calls, final, repair=None):
         self.tool_calls, self.final, self.repair = tool_calls, final, repair
         self.results, self.repair_calls, self.repair_user = [], 0, ""
+        self.user = ""
 
     @staticmethod
     def _complete(answer):
@@ -272,6 +273,7 @@ class FakeGateway:
         return answer
 
     def run_tool_loop(self, *, handler, tools, **kw):
+        self.user = kw["user"]
         self.results = [handler(name, args) for name, args in self.tool_calls]
         text = self._complete(self.final("\n".join(self.results)))
         return ToolLoopResult(text=text if isinstance(text, str) else json.dumps(text),
@@ -455,3 +457,62 @@ def test_a_repo_left_out_without_a_decision_is_repaired_not_dropped(project_id):
     assert "these repos were not decided: analytics-jobs" in gw.repair_user
     assert {r.repo for r in result.repos} == {"orders-api", "analytics-jobs"}
     assert result.stats["repaired"] is True
+
+
+# --- bug reports: type, attachments, files named in the report ---------------
+
+TRACE = """Traceback (most recent call last):
+  File "/srv/shop/src/orders/routes.py", line 6, in create_order
+    order = Order("o-1", payload["items"], payload["total_cents"])
+KeyError: 'total_cents'
+"""
+
+
+def test_files_named_in_a_stack_trace_are_numbered_and_handed_to_the_agent(project_id):
+    def final(results):                   # cites the frame file by the number it was given in the prompt
+        fid_ = re.search(r"\[(F\d+)\] orders-api: src/orders/routes.py \(line 6\)", gw.user).group(1)
+        return {"repos": [{"repo": "orders-api", "role": "primary", "reason": "KeyError raised in create_order",
+                           "evidence": [{"file": fid_, "note": "payload['total_cents'] missing"}]}]}
+
+    gw = FakeGateway([("list_repos", {})], final)
+    result = rr.select_repos(project_id, "Creating an order returns 500", attachments=[TRACE], gateway=gw,
+                             request_type="bug")
+    assert "## Files named in the report" in gw.user
+    assert "KeyError: 'total_cents'" in gw.user                   # the attachment itself is included
+    assert [e.path for e in result.repos[0].evidence] == ["src/orders/routes.py"]
+    assert result.stats["files_named_in_report"] == 1 and result.stats["request_type"] == "bug"
+
+
+def test_the_stated_request_type_is_given_to_the_agent(project_id):
+    gw = FakeGateway(SEARCH_API, api_and_web_answer)
+    rr.select_repos(project_id, "x", gateway=gw, request_type="bug")
+    assert gw.user.startswith("## Request type\nbug (stated by the user)")
+    gw = FakeGateway(SEARCH_API, api_and_web_answer)
+    rr.select_repos(project_id, "x", gateway=gw)                 # not stated: the agent decides
+    assert "## Request type" not in gw.user and gw.user.startswith("## Request\nx")
+
+
+def test_no_report_files_section_when_the_text_names_no_files(project_id):
+    gw = FakeGateway(SEARCH_API, api_and_web_answer)
+    rr.select_repos(project_id, "Order totals look wrong at checkout", gateway=gw)
+    assert "Files named in the report" not in gw.user
+
+
+def test_an_unknown_request_type_is_rejected(project_id):
+    with pytest.raises(rr.RepoSelectionError, match="request type"):
+        rr.select_repos(project_id, "x", gateway=FakeGateway([], lambda r: "{}"), request_type="chore")
+
+
+def test_a_file_named_in_the_report_can_be_cited_in_the_repair_too(project_id):
+    """The numbered files are in the registry, so they are in the repair listing."""
+    def final(results):
+        return {"repos": [{"repo": "orders-api", "role": "primary", "reason": "r",
+                           "evidence": [{"file": "F99", "note": "n"}]}]}
+
+    def repair(user):
+        return {"repos": [{"repo": "orders-api", "role": "primary", "reason": "r",
+                           "evidence": [{"file": listing_id(user, "orders-api", "src/orders/routes.py"), "note": "n"}]}]}
+
+    gw = FakeGateway([], final, repair)
+    result = rr.select_repos(project_id, "x", attachments=[TRACE], gateway=gw)
+    assert [e.path for e in result.repos[0].evidence] == ["src/orders/routes.py"]

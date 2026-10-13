@@ -194,3 +194,18 @@ def test_add_repo_to_existing_project_by_path_and_validation(client, inline_inde
     # exactly one of repo / repo_id
     assert client.post(f"/v1/projects/{pid}/repos", json={}).status_code == 422
     assert client.post(f"/v1/projects/{pid}/repos", json={"repo": "/x", "repo_id": 1}).status_code == 422
+
+
+def test_select_repos_passes_type_and_attachments_through(client, monkeypatch):
+    pid = client.post("/v1/projects", json={"name": name(), "repo_ids": [make_repo()]}).json()["project_id"]
+    seen = {}
+
+    def fake_select(project_id, text, attachments=None, **kw):
+        seen.update(attachments=attachments, **kw)
+        return RepoSelection(project_id=project_id, repos=[], stats={})
+
+    monkeypatch.setattr(repo_router, "select_repos", fake_select)
+    resp = client.post(f"/v1/projects/{pid}/select-repos",
+                       json={"text": "500 on checkout", "attachments": ["trace"], "type": "bug"})
+    assert resp.status_code == 200 and seen == {"attachments": ["trace"], "request_type": "bug"}
+    assert client.post(f"/v1/projects/{pid}/select-repos", json={"text": "x", "type": "chore"}).status_code == 422
